@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Packet Highway</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --panel-bg: rgba(6, 10, 18, 0.82);
+    --panel-border: rgba(80, 140, 200, 0.18);
+    --text-dim: #5d738c;
+    --text-main: #c8d6e5;
+    --green: #36d399;
+    --red: #ff5d6c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #04060c; }
+  body { font-family: "Cascadia Mono", Consolas, "Courier New", monospace; }
+  canvas#scene { position: fixed; inset: 0; display: block; }
+
+  .panel {
+    position: fixed; z-index: 5;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 14px 18px;
+    color: var(--text-main);
+    backdrop-filter: blur(4px);
+    user-select: none;
+  }
+
+  /* ---- top-left dashboard ---- */
+  #dash { top: 18px; left: 18px; min-width: 330px; }
+  #dash h1 { font-size: 21px; letter-spacing: 5px; font-weight: 700; color: #e8f1fa; display: inline-block; }
+  #badge {
+    display: inline-block; margin-left: 10px; padding: 3px 10px; border-radius: 4px;
+    font-size: 12px; letter-spacing: 1px; vertical-align: 4px;
+    background: rgba(36, 90, 60, 0.55); color: var(--green); border: 1px solid rgba(54, 211, 153, 0.35);
+  }
+  #badge.demo { background: rgba(90, 80, 30, 0.5); color: #e8c252; border-color: rgba(232, 194, 82, 0.4); }
+  #badge.error { background: rgba(90, 30, 36, 0.5); color: var(--red); border-color: rgba(255, 93, 108, 0.4); }
+  #dash table { margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 14px; }
+  #dash td { padding: 2px 0; }
+  #dash td.k { color: var(--text-dim); }
+  #dash td.in  { text-align: right; color: #e85d75; min-width: 86px; }
+  #dash td.out { text-align: right; color: #e85d75; min-width: 86px; }
+  #dash tr.hdr td { color: var(--text-dim); font-size: 13px; }
+  #dash tr.hdr td.in::before  { content: "↓ "; }
+  #dash tr.hdr td.out::before { content: "↑ "; }
+  #netline { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--panel-border);
+             font-size: 13px; color: var(--text-dim); }
+  #netline b { font-weight: 400; color: var(--text-main); }
+  #netline b.good { color: var(--green); }
+  #netline b.warn { color: #e8c252; }
+  #netline b.bad  { color: var(--red); }
+
+  /* ---- top-right legend ---- */
+  #legend { top: 18px; right: 18px; min-width: 300px; font-size: 14px; }
+  #legend h2 { font-size: 13px; letter-spacing: 3px; color: var(--text-dim); margin-bottom: 10px; font-weight: 400; }
+  #legend .row { display: flex; align-items: center; padding: 2.5px 0; }
+  #legend .dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 10px; flex: none; }
+  #legend .veh { flex: 1; color: var(--text-main); }
+  #legend .proto { color: var(--text-dim); }
+
+  /* ---- bottom-left passing log ---- */
+  #log { bottom: 18px; left: 18px; width: 330px; max-height: 290px; overflow: hidden; }
+  #log h2 { font-size: 13px; letter-spacing: 3px; color: var(--text-dim); margin-bottom: 8px; font-weight: 400; }
+  #log .row { display: flex; align-items: center; font-size: 13px; padding: 1.5px 0; }
+  #log .dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 9px; flex: none; }
+  #log .proto { width: 64px; color: var(--text-main); }
+  #log .app { flex: 1; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px; }
+  #log .app img { width: 13px; height: 13px; vertical-align: -2px; margin-right: 5px; }
+  #log .bytes { color: #8aa3bd; text-align: right; }
+  #log .row.old { opacity: 0.45; }
+
+  /* ---- bottom-right servers panel ---- */
+  #servers { bottom: 64px; right: 18px; min-width: 290px; font-size: 13px; }
+  body.wallpaper #servers { bottom: 18px; }
+  #servers h2 { font-size: 13px; letter-spacing: 3px; color: var(--text-dim); margin-bottom: 8px; font-weight: 400; }
+  #servers h2 b { color: var(--text-main); font-weight: 400; }
+  #servers .row { display: flex; align-items: center; padding: 2px 0; }
+  #servers .row img { width: 13px; height: 13px; margin-right: 8px; }
+  #servers .row .ph { width: 13px; height: 13px; margin-right: 8px; border-radius: 50%; background: #233048; flex: none; }
+  #servers .host { flex: 1; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px; }
+  #servers .pk { color: var(--text-dim); }
+
+  /* ---- bottom-right hint / inspector ---- */
+  #hint { bottom: 18px; right: 18px; font-size: 13px; color: var(--text-dim); }
+  #inspect { bottom: 70px; right: 18px; font-size: 13px; display: none; min-width: 260px; }
+  #inspect h3 { font-size: 14px; margin-bottom: 8px; color: #e8f1fa; }
+  #inspect h3 img { width: 16px; height: 16px; vertical-align: -3px; margin-right: 6px; }
+  #inspect div { padding: 1px 0; color: var(--text-main); }
+  #inspect span { color: var(--text-dim); display: inline-block; width: 70px; }
+
+  body.wallpaper #hint, body.wallpaper #inspect { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div class="panel" id="dash">
+  <h1>PACKET HIGHWAY</h1><span id="badge">STARTING</span>
+  <table>
+    <tr class="hdr"><td></td><td class="in">in</td><td class="out">out</td></tr>
+    <tr><td class="k">packets/s</td><td class="in" id="ppsIn">0</td><td class="out" id="ppsOut">0</td></tr>
+    <tr><td class="k">traffic/s</td><td class="in" id="bpsIn">0 B</td><td class="out" id="bpsOut">0 B</td></tr>
+    <tr><td class="k">on the road</td><td class="in" id="onRoad">0</td><td class="out" id="pct">100%</td></tr>
+  </table>
+  <div id="netline">ping <b id="ping">—</b> · <b id="link">—</b> · lanes <b id="lanesEl">8</b></div>
+</div>
+
+<div class="panel" id="legend">
+  <h2>WHO'S DRIVING</h2>
+</div>
+
+<div class="panel" id="log">
+  <h2>PASSING TRAFFIC</h2>
+  <div id="logRows"></div>
+</div>
+
+<div class="panel" id="servers">
+  <h2>CONNECTED SERVERS · <b id="srvCount">0</b></h2>
+  <div id="srvRows"></div>
+</div>
+
+<div class="panel" id="inspect"></div>
+<div class="panel" id="hint">drag · scroll to zoom · click a car to inspect</div>
+
+<script src="three.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

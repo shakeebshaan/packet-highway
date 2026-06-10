@@ -1,0 +1,12 @@
+# build output — rebuilt on first run by build.bat
+PacketHighway.exe
+
+# runtime state
+.wallpaper*.pid
+
+# local tooling
+.gstack/
+humanpending.md
+
+# local marketing drafts — not part of the public repo
+MARKETING.md
