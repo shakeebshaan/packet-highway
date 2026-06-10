@@ -10,7 +10,10 @@ No installs, no dependencies, no admin (in demo mode) — it's built entirely
 from what already ships with Windows: `pktmon`, the .NET C# compiler, and
 Microsoft Edge.
 
-![Packet Highway](media/screenshot.png)
+![Packet Highway running as a live wallpaper behind desktop icons](media/demo.gif)
+
+*Real recording of the wallpaper running behind the desktop icons —
+[higher-quality MP4](media/demo.mp4), or a [still](media/screenshot.png).*
 
 **[▶ Live demo in your browser](https://shakeebshaan.github.io/packet-highway/)** —
 synthetic traffic, nothing is captured. Drag to orbit, scroll to zoom, click a
