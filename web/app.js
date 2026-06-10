@@ -39,12 +39,15 @@
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: !ECO && !WALLPAPER, powerPreference: ECO ? 'low-power' : 'default' });
   renderer.setPixelRatio(PIXEL_RATIO);
   renderer.setSize(window.innerWidth, window.innerHeight);
+  // filmic grade — the whole retro-future look keys off this
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
 
   var scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x04060c);
-  scene.fog = new THREE.Fog(0x04060c, 130, 430);
+  scene.background = new THREE.Color(0x131a30);
+  scene.fog = new THREE.Fog(0x131a30, 130, 430);
 
-  var camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.5, 800);
+  var camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.5, 1200);
   var camTarget = new THREE.Vector3(-2, 0, -50);
   var camYaw = 0.62, camPitch = 0.30, camDist = 95;
   function applyCamera() {
@@ -56,10 +59,77 @@
   }
   applyCamera();
 
-  scene.add(new THREE.HemisphereLight(0x33415e, 0x05070d, 0.9));
-  var dl = new THREE.DirectionalLight(0x8fb0e0, 0.55);
-  dl.position.set(-40, 80, 30);
+  scene.add(new THREE.HemisphereLight(0x3a4a78, 0x1a1238, 1.1)); // indigo sky, violet bounce
+  var dl = new THREE.DirectionalLight(0x9db8e8, 0.7);
+  dl.position.set(-130, 90, -260);
   scene.add(dl);
+
+  // --------------------------------------------------- sky (retro-future)
+  var starsMat, starsMat2, sunY = 70;
+  (function sky() {
+    // vertex-colored dome: indigo zenith -> violet horizon with an ember band
+    var geo = new THREE.SphereGeometry(900, 16, 12);
+    var pos = geo.attributes.position, cols = [];
+    var top = new THREE.Color(0x05060f), mid = new THREE.Color(0x1a1238), hor = new THREE.Color(0x3a2450);
+    for (var i = 0; i < pos.count; i++) {
+      var t = Math.max(0, Math.min(1, pos.getY(i) / 900));
+      var c2 = t < 0.18 ? hor.clone().lerp(mid, t / 0.18) : mid.clone().lerp(top, (t - 0.18) / 0.82);
+      cols.push(c2.r, c2.g, c2.b);
+    }
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+    scene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false })));
+
+    // two star layers, twinkled in the loop by whole-material opacity
+    function starLayer(count, size, opacity) {
+      var sp = [];
+      for (var s = 0; s < count; s++) {
+        var az = Math.random() * Math.PI * 2, el2 = 0.08 + Math.random() * 1.4;
+        sp.push(850 * Math.cos(el2) * Math.sin(az), 850 * Math.sin(el2), 850 * Math.cos(el2) * Math.cos(az) * -1);
+      }
+      var g2 = new THREE.BufferGeometry();
+      g2.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
+      var m2 = new THREE.PointsMaterial({ color: 0xbfd0ff, size: size, sizeAttenuation: false, transparent: true, opacity: opacity, fog: false });
+      scene.add(new THREE.Points(g2, m2));
+      return m2;
+    }
+    starsMat = starLayer(260, 2.2, 0.8);
+    starsMat2 = starLayer(180, 1.4, 0.5);
+
+    // the synthwave sun: striped gradient disc low on the horizon
+    var c = document.createElement('canvas'); c.width = 256; c.height = 256;
+    var g3 = c.getContext('2d');
+    var grad = g3.createLinearGradient(0, 20, 0, 236);
+    grad.addColorStop(0, '#ffb04a'); grad.addColorStop(0.55, '#ff5e8a'); grad.addColorStop(1, '#c026c9');
+    g3.fillStyle = grad;
+    g3.beginPath(); g3.arc(128, 128, 108, 0, Math.PI * 2); g3.fill();
+    g3.globalCompositeOperation = 'destination-out';
+    for (var st = 0; st < 7; st++) { // widening scanline gaps toward the bottom
+      var sy = 128 + 14 + st * (10 + st * 2.4);
+      g3.fillRect(0, sy, 256, 3 + st * 1.7);
+    }
+    var sunTex = new THREE.CanvasTexture(c);
+    var sun = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, transparent: true, fog: false, depthWrite: false }));
+    sun.scale.set(230, 230, 1);
+    sun.position.set(-40, sunY, -800);
+    scene.add(sun);
+    var halo = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: radialTex('rgba(255,94,138,0.5)'), transparent: true, fog: false,
+      blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.7
+    }));
+    halo.scale.set(420, 420, 1);
+    halo.position.copy(sun.position);
+    scene.add(halo);
+  })();
+
+  // shared helper: radial gradient texture (glow sprites, light pools)
+  function radialTex(rgba) {
+    var c = document.createElement('canvas'); c.width = 128; c.height = 128;
+    var g = c.getContext('2d');
+    var grad = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+    grad.addColorStop(0, rgba); grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(c);
+  }
 
   // ------------------------------------------------------------ world
   var ROAD_LEN = 480, Z0 = -ROAD_LEN / 2 - 60, Z1 = ROAD_LEN / 2 - 60; // road spans z in [Z0, Z1]
@@ -74,11 +144,11 @@
   function roadTexture(n) {
     var c = document.createElement('canvas'); c.width = 256; c.height = 256;
     var g = c.getContext('2d');
-    g.fillStyle = '#0b0e15'; g.fillRect(0, 0, 256, 256);
+    g.fillStyle = '#06080d'; g.fillRect(0, 0, 256, 256); // wet-asphalt dark base
     g.fillStyle = 'rgba(255,255,255,0.02)';
     for (var i = 0; i < 300; i++) g.fillRect(Math.random() * 256, Math.random() * 256, 2, 2);
     var lw = 256 / n; // n lanes => n-1 dashed separators + solid edges
-    g.strokeStyle = '#c9cdd6'; g.lineWidth = 3; g.setLineDash([26, 30]);
+    g.strokeStyle = '#aeb6c2'; g.lineWidth = 3; g.setLineDash([26, 30]);
     for (var l = 1; l < n; l++) {
       g.beginPath(); g.moveTo(lw * l, 0); g.lineTo(lw * l, 256); g.stroke();
     }
@@ -164,16 +234,60 @@
   var median = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.7, ROAD_LEN),
     new THREE.MeshLambertMaterial({ color: 0x141926 }));
   median.position.set(0, 0.35, (Z0 + Z1) / 2); scene.add(median);
+  // neon edge strips on the median (TRON accent, unlit = glows under ACES)
+  var neonMat = new THREE.MeshBasicMaterial({ color: 0x2ee6e0 });
+  [-1.52, 1.52].forEach(function (nx) {
+    var strip = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.1, ROAD_LEN), neonMat);
+    strip.position.set(nx, 0.72, (Z0 + Z1) / 2); scene.add(strip);
+  });
 
-  // street lights along the median
+  // street lights along the median + static glow package (pools, halos, wet streaks)
   var poleMat = new THREE.MeshLambertMaterial({ color: 0x1a2030 });
   var bulbMat = new THREE.MeshBasicMaterial({ color: 0xf8edc8 });
-  for (var z = Z0 + 20; z < Z1; z += 46) {
-    var pole = new THREE.Mesh(new THREE.BoxGeometry(0.35, 9, 0.35), poleMat);
-    pole.position.set(0, 4.5, z); scene.add(pole);
-    var bulb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.3, 0.6), bulbMat);
-    bulb.position.set(0, 9, z); scene.add(bulb);
-  }
+  var bulbWarm = new THREE.Color(0xf8edc8), bulbCool = new THREE.Color(0xcfe8ff);
+  (function streetlights() {
+    var lampZ = [];
+    for (var z = Z0 + 20; z < Z1; z += 46) lampZ.push(z);
+    lampZ.forEach(function (z) {
+      var pole = new THREE.Mesh(new THREE.BoxGeometry(0.35, 9, 0.35), poleMat);
+      pole.position.set(0, 4.5, z); scene.add(pole);
+      var bulb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.3, 0.6), bulbMat);
+      bulb.position.set(0, 9, z); scene.add(bulb);
+    });
+
+    // one instanced mesh per effect: all lamps cost 1 draw call each
+    var poolGeo = new THREE.PlaneGeometry(13, 9); poolGeo.rotateX(-Math.PI / 2);
+    var poolMat = new THREE.MeshBasicMaterial({
+      map: radialTex('rgba(255,236,190,0.4)'), transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false
+    });
+    var pools = new THREE.InstancedMesh(poolGeo, poolMat, lampZ.length);
+    var streakGeo = new THREE.PlaneGeometry(2.0, 24); streakGeo.rotateX(-Math.PI / 2);
+    var streakMat = new THREE.MeshBasicMaterial({
+      map: radialTex('rgba(255,220,170,0.22)'), transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false
+    });
+    var streaks = new THREE.InstancedMesh(streakGeo, streakMat, lampZ.length * 2);
+    var m4 = new THREE.Matrix4();
+    lampZ.forEach(function (z, i) {
+      m4.setPosition(0, 0.025, z); pools.setMatrixAt(i, m4);
+      m4.setPosition(-8, 0.02, z + 6); streaks.setMatrixAt(i * 2, m4);
+      m4.setPosition(8, 0.02, z + 6); streaks.setMatrixAt(i * 2 + 1, m4);
+    });
+    pools.renderOrder = 2; streaks.renderOrder = 2;
+    scene.add(pools); scene.add(streaks);
+
+    // bulb halo sprites
+    var haloMat = new THREE.SpriteMaterial({
+      map: radialTex('rgba(255,240,200,0.55)'), transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    lampZ.forEach(function (z) {
+      var s = new THREE.Sprite(haloMat);
+      s.scale.set(5, 3.4, 1); s.position.set(0, 9, z);
+      scene.add(s);
+    });
+  })();
 
   // buildings with lit windows
   function buildingTexture() {
@@ -208,6 +322,34 @@
     bld.position.set(bx, h / 2 - 0.1, bz);
     scene.add(bld);
   }
+
+  // distant parallax skyline silhouettes (camera drift sells the depth)
+  (function skyline() {
+    function layer(wpx, hpx, tint, w3, h3, z3) {
+      var c = document.createElement('canvas'); c.width = wpx; c.height = hpx;
+      var g = c.getContext('2d');
+      g.fillStyle = tint;
+      var x = 0;
+      while (x < wpx) {
+        var bw = 30 + Math.random() * 70, bh = hpx * (0.35 + Math.random() * 0.6);
+        g.fillRect(x, hpx - bh, bw, bh);
+        x += bw + 6 + Math.random() * 18;
+      }
+      g.fillStyle = 'rgba(255,225,170,0.5)';
+      for (var d = 0; d < wpx * hpx / 900; d++) {
+        var dx = Math.random() * wpx, dy = hpx * 0.3 + Math.random() * hpx * 0.65;
+        if (g.getImageData(dx, dy, 1, 1).data[3] > 0) g.fillRect(dx, dy, 1.5, 1.5);
+      }
+      var tex = new THREE.CanvasTexture(c);
+      var m = new THREE.Mesh(new THREE.PlaneGeometry(w3, h3),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, fog: false }));
+      m.position.set(0, h3 / 2 - 2, z3);
+      scene.add(m);
+    }
+    layer(1024, 200, '#232b47', 900, 130, -350);
+    layer(1024, 220, '#1a2038', 1000, 165, -430);
+    layer(1024, 240, '#12182c', 1150, 200, -510);
+  })();
 
   // "PACKET HIGHWAY" sign over the median — subtitle updates with live stats
   var signCtx, signTex;
