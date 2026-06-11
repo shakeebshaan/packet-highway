@@ -555,24 +555,29 @@
     });
   })();
 
-  // buildings with lit windows (night) / concrete facades (day)
-  function buildingTexture(day) {
+  // buildings with lit windows (night) / concrete facades (day);
+  // varied window-grid cell sizes so the skyline isn't one repeated facade
+  function buildingTexture(day, cell) {
+    cell = cell || 9;
     var c = document.createElement('canvas'); c.width = 64; c.height = 128;
     var g = c.getContext('2d');
     g.fillStyle = day ? '#67737f' : '#070a12'; g.fillRect(0, 0, 64, 128);
     var palette = day ? ['#2c3644', '#333f4e', '#3b4856'] : ['#e8d8a8', '#c8d8f0', '#f0c890', '#a8c8e8'];
-    for (var y = 6; y < 122; y += 9)
-      for (var x = 5; x < 58; x += 9)
+    var wW = Math.max(3, cell - 4), wH = Math.max(2, cell - 5);
+    for (var y = 6; y < 128 - cell; y += cell)
+      for (var x = 5; x < 64 - cell; x += cell)
         if (day || Math.random() < 0.24) {
           g.fillStyle = palette[(Math.random() * palette.length) | 0];
           g.globalAlpha = day ? 0.9 : 0.5 + Math.random() * 0.5;
-          g.fillRect(x, y, 5, 4);
+          g.fillRect(x, y, wW, wH);
         }
     g.globalAlpha = 1;
     return new THREE.CanvasTexture(c);
   }
-  var bTex = [buildingTexture(), buildingTexture(), buildingTexture(), buildingTexture()];
-  var bTexDay = [buildingTexture(true), buildingTexture(true), buildingTexture(true), buildingTexture(true)];
+  var _bCells = [9, 8, 11, 9, 12, 7];
+  var bTex = _bCells.map(function (cl) { return buildingTexture(false, cl); });
+  var bTexDay = _bCells.map(function (cl) { return buildingTexture(true, cl); });
+  var roofMat = new THREE.MeshBasicMaterial({ color: 0x222936 });
   var procBuildings = []; // skyline towers bound to real processes (see handleProcs)
   var bbCandidates = [];
   for (var b = 0; b < BUILDING_COUNT; b++) {
@@ -592,15 +597,31 @@
     dtex.wrapS = dtex.wrapT = THREE.RepeatWrapping;
     dtex.repeat.copy(tex.repeat);
     dtex.needsUpdate = true;
-    var mat = new THREE.MeshBasicMaterial({ map: tex });
-    buildingsList.push({ mat: mat, night: tex, day: dtex });
+    // faked sun shading: +x/+z faces lit, -x/-z faces in shade, flat roof slab
+    var jit = 0.86 + Math.random() * 0.26; // per-building albedo so no two match
+    var matLit = new THREE.MeshBasicMaterial({ map: tex });
+    var matShade = new THREE.MeshBasicMaterial({ map: tex });
+    matLit.color.setScalar(jit);
+    matShade.color.setScalar(jit * 0.66);
+    buildingsList.push({ mat: matLit, night: tex, day: dtex });
+    buildingsList.push({ mat: matShade, night: tex, day: dtex });
     // unit-height box scaled live: each skyline tower tracks a real process
     // (height = its RAM share, window brightness = its CPU use)
-    var bld = new THREE.Mesh(new THREE.BoxGeometry(w, 1, d), mat);
+    var bld = new THREE.Mesh(new THREE.BoxGeometry(w, 1, d),
+      [matLit, matShade, roofMat, roofMat, matLit, matShade]);
     bld.scale.y = h;
     bld.position.set(bx, h / 2 - 0.1, bz);
     scene.add(bld);
-    var rec = { mesh: bld, mat: mat, night: tex, day: dtex, w: w, cur: h, target: h, label: null, labelName: null, pinned: false };
+    // rooftop clutter (AC units / tanks) breaks the flat-slab silhouette
+    var roof = new THREE.Group();
+    for (var rc = 0, rcn = 1 + (Math.random() * 2 | 0); rc < rcn; rc++) {
+      var rw = 2 + Math.random() * Math.min(6, w * 0.25);
+      box(roof, rw, 1.2 + Math.random() * 2.4, rw, poleMat,
+          (Math.random() - 0.5) * w * 0.5, 0.8, (Math.random() - 0.5) * d * 0.5);
+    }
+    roof.position.set(bx, h - 0.1, bz);
+    scene.add(roof);
+    var rec = { mesh: bld, lit: matLit, shade: matShade, jit: jit, roof: roof, night: tex, day: dtex, w: w, cur: h, target: h, label: null, labelName: null, pinned: false };
     procBuildings.push(rec);
     if (h > 40 && Math.abs(bx) < 150 && bz > -260 && bz < 20)
       bbCandidates.push({ x: bx, h: h, w: w, d: d, z: bz, rec: rec });
@@ -1327,10 +1348,14 @@
   }
   street(-58, -89, 5.5, 152, true);   // app-city avenue
   for (var sd = 0; sd < 8; sd++) street(-65, -28 - sd * 17, 4, 15, false); // tower driveways
-  street(-45, -89, 5, 25, false);     // interchange connector to the highway edge
+  street(-38, -89, 5, 42, false);     // interchange ramp — runs under the highway shoulder
+  street(-72, -13, 4.5, 30, false);   // avenue end caps into the back blocks
+  street(-72, -165, 4.5, 30, false);
   street(58, -88, 5.5, 122, true);    // utilities avenue
   [-42, -72, -102, -134].forEach(function (uz) { street(63.5, uz, 4, 12, false); });
-  street(46, -88, 5, 25, false);
+  street(38, -88, 5, 42, false);      // utilities ramp to the highway shoulder
+  street(72, -27, 4.5, 30, false);    // avenue end caps
+  street(72, -149, 4.5, 30, false);
 
   var shuttles = [], lastShuttleAt = 0;
   function spawnShuttle() {
@@ -1342,7 +1367,7 @@
       new THREE.Vector3(-69, 0, tz),
       new THREE.Vector3(-58, 0, tz),
       new THREE.Vector3(-58, 0, -89),
-      new THREE.Vector3(-34, 0, -89)
+      new THREE.Vector3(-27, 0, -89) // merges at the highway shoulder
     ];
     if (!leaving) pts.reverse();
     var g = TEMPLATES.other.group.clone();
@@ -1397,7 +1422,9 @@
       var rec = free[j], p = list[j];
       if (p) {
         rec.target = 13 + 64 * (p.ram / maxRam);
-        rec.mat.color.setScalar(1 + Math.min(1.4, (p.cpu || 0) / 45)); // hot proc = bright windows
+        var bright = 1 + Math.min(1.4, (p.cpu || 0) / 45); // hot proc = bright windows
+        rec.lit.color.setScalar(rec.jit * bright);
+        rec.shade.color.setScalar(rec.jit * bright * 0.66);
         if (j < 5) {
           if (rec.labelName !== p.n) {
             if (rec.label) { rec.mesh.parent.remove(rec.label); rec.label.material.map.dispose(); rec.label.material.dispose(); }
@@ -1412,7 +1439,8 @@
         }
       } else {
         rec.target = 9; // no process for this lot: idle land
-        rec.mat.color.setScalar(1);
+        rec.lit.color.setScalar(rec.jit);
+        rec.shade.color.setScalar(rec.jit * 0.66);
       }
     }
   }
@@ -1766,6 +1794,7 @@
         rb.day.repeat.copy(rb.night.repeat);
       }
       if (rb.label) rb.label.position.y = rb.cur + 4;
+      if (rb.roof) rb.roof.position.y = rb.cur - 0.1;
     }
 
     // utilities district: plant smokes with CPU, tank fills with RAM,
@@ -2454,6 +2483,7 @@
       m2.opacity = 1 - envDayW * 0.15;
     });
     ground.material.color.set(0x05070d).lerp(new THREE.Color(0x5d6873), envDayW);
+    roofMat.color.set(0x222936).lerp(new THREE.Color(0x7e8792), envDayW);
     roadMeshes.forEach(function (m3) { m3.material.color.setScalar(1 + envDayW * 0.55); });
   }
   setInterval(applyEnvironment, 60000);
