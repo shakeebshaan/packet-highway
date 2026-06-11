@@ -1267,9 +1267,9 @@
     var ring = new THREE.Mesh(new THREE.TorusGeometry(8.2, 0.32, 8, 40),
       new THREE.MeshBasicMaterial({ color: 0x9a5cff, transparent: true, opacity: 0.85 }));
     ring.rotation.x = Math.PI / 2;
-    ring.position.set(UTIL_X, 5.6, -134); scene.add(ring);
+    ring.position.set(UTIL_X, 5.15, -134); scene.add(ring); // hugs the arena rim
     for (var rm = 0; rm < 3; rm++) { // markers make the spin visible
-      var mk = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.7, 0.7),
+      var mk = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.5, 0.5),
         new THREE.MeshBasicMaterial({ color: 0xd8b4ff }));
       var ra = rm / 3 * Math.PI * 2;
       mk.position.set(Math.cos(ra) * 8.2, Math.sin(ra) * 8.2, 0);
@@ -1742,7 +1742,7 @@
         dd.out = !dd.out;
         var dst = dd.out
           ? new THREE.Vector3(-8 + Math.random() * 16, 15 + Math.random() * 5, tz + (Math.random() * 36 - 18))
-          : new THREE.Vector3(APPCITY_X + (Math.random() * 8 - 4), (tower ? tower.cur + 9 : 22 + Math.random() * 8), tz);
+          : new THREE.Vector3(APPCITY_X + (Math.random() * 8 - 4), Math.max(20, tower ? tower.cur + 9 : 24), tz); // stay above the freight rail
         dd.leg = { from: dd.g.position.clone(), to: dst, dur: 5.5 + Math.random() * 3 };
         dd.t = 0;
       }
@@ -1832,7 +1832,7 @@
         t.mesh.position.y = t.cur / 2;
         t.body.repeat.set(1, Math.max(1, Math.round(t.cur / 26)));
         t.bodyDay.repeat.copy(t.body.repeat);
-        t.plate.position.y = t.cur + 6;
+        t.plate.position.y = t.cur + 3.2; // sits on the roofline, not floating
       }
     }
 
@@ -1953,7 +1953,9 @@
     // street lamps shift warm -> cool as the network heats up
     var load = Math.min(1, mbps / 50);
     expoTarget = (1.06 + load * 0.24) * envExpo;
-    fogFarTarget = lastPing < 0 ? 360 : 430 - Math.min(110, Math.max(0, lastPing - 35) * 0.9);
+    // clear days see much further; the wide high shots otherwise drown in fog
+    fogFarTarget = (lastPing < 0 ? 360 : 430 - Math.min(110, Math.max(0, lastPing - 35) * 0.9)) *
+                   (1 + envDayW * 0.9);
     if (!bulbOff) bulbOff = new THREE.Color(0x3a4350);
     bulbMat.color.copy(bulbWarm).lerp(bulbCool, load).lerp(bulbOff, bulbOffW);
 
@@ -2323,6 +2325,11 @@
     rain: function (lvl) { envRain = lvl == null ? 0.7 : lvl; applyEnvironment(); },
     crash: function (k, n) { lastAcc = 0; accident(k || 'drop', n || 3); },
     crashCount: function () { return crashes.length; },
+    cam: function (yaw, pitch, dist, tz) {
+      camYaw = yaw; camPitch = pitch; camDist = dist;
+      if (tz != null) camTarget.z = tz;
+      applyCamera();
+    },
     env: function () {
       return JSON.stringify({
         h: (__ph._h != null) ? __ph._h : (new Date().getHours() + new Date().getMinutes() / 60),
@@ -2348,7 +2355,7 @@
   var PHASES = {
     night:  { top: 0x05060f, mid: 0x1a1238, hor: 0x3a2450, fog: 0x131a30, hemiSky: 0x3a4a78, hemiGnd: 0x1a1238, hemiI: 1.25, dlC: 0x9db8e8, dlI: 0.7, stars: 1, sunY: -180, sunC: 0xffffff, expo: 1 },
     golden: { top: 0x2a2438, mid: 0x7a4252, hor: 0xe08040, fog: 0x4a3340, hemiSky: 0xc08a5a, hemiGnd: 0x4a2e3a, hemiI: 1.2, dlC: 0xffb060, dlI: 1.15, stars: 0.15, sunY: 46, sunC: 0xffd0a0, expo: 1.05 },
-    day:    { top: 0x3d7ecf, mid: 0x74a8dc, hor: 0xaecdea, fog: 0x8aa6c0, hemiSky: 0xaccae8, hemiGnd: 0x707d8c, hemiI: 1.3, dlC: 0xfff2dd, dlI: 1.4, stars: 0, sunY: 340, sunC: 0xffffff, expo: 0.98 }
+    day:    { top: 0x3d7ecf, mid: 0x74a8dc, hor: 0xaecdea, fog: 0x8fabc6, hemiSky: 0xaccae8, hemiGnd: 0x7a8694, hemiI: 1.45, dlC: 0xfff2dd, dlI: 1.55, stars: 0, sunY: 340, sunC: 0xffffff, expo: 0.98 }
   };
   var RAIN_N = ECO ? 400 : 1500;
   var rainGeo = new THREE.BufferGeometry();
@@ -2446,7 +2453,7 @@
       m2.color.setScalar(1 + envDayW * 1.6);
       m2.opacity = 1 - envDayW * 0.15;
     });
-    ground.material.color.set(0x05070d).lerp(new THREE.Color(0x434c56), envDayW);
+    ground.material.color.set(0x05070d).lerp(new THREE.Color(0x5d6873), envDayW);
     roadMeshes.forEach(function (m3) { m3.material.color.setScalar(1 + envDayW * 0.55); });
   }
   setInterval(applyEnvironment, 60000);
