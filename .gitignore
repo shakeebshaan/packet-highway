@@ -11,3 +11,7 @@ humanpending.md
 
 # local marketing drafts — not part of the public repo
 MARKETING.md
+
+# runtime logs
+.watchdog.log
+capture_sample.log

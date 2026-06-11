@@ -56,7 +56,44 @@ windows don't receive mouse input.
 **App logos:** packets are attributed to the owning process (local port →
 PID via the Windows TCP/UDP tables). The app's icon is extracted from its exe
 and floats above the vehicle; the app name also shows in the passing-traffic
-log and the click-to-inspect card.
+log and the click-to-inspect card. Packets that genuinely belong to no app
+(DNS resolver lookups, kernel traffic) carry a protocol badge in their legend
+color instead — nothing rides unlabeled.
+
+Vehicles are real low-poly 3D models from [Kenney's Car Kit](https://kenney.nl/assets/car-kit)
+and [Starter Kit Racing](https://github.com/KenneyNL/Starter-Kit-Racing)
+(CC0, thank you Kenney!), tinted per protocol. The city bus is a kitbashed
+stretch of the van; if a model fails to load the procedural box vehicle steps
+back in automatically.
+
+## The city is your computer
+
+Everything in frame means something:
+
+- **Skyline towers = running processes** — height is RAM share, window
+  brightness is CPU use, the top 5 get roof name signs.
+- **Right bank: the machine room** — a CPU power plant (smokestacks work
+  harder under load), a RAM tank (glowing fill level), a disk silo (fill % +
+  dock LED blinking with read/write), and a GPU arena (neon ring spins faster
+  under load), each with a live readout plate.
+- **Left bank: app city** — the apps talking right now rise as towers
+  (height = traffic share) with jumbotron billboards; courier cars visibly
+  commute between their tower and the highway interchange.
+- **Drones** are couriers for your top servers, carrying the server's app logo
+  between its tower and the highway.
+- **Freight train** crosses the skyline on a bandwidth spike (banner shows the
+  burst rate); an **airplane** lands for a heavy download and takes off for a
+  heavy upload.
+- **Accidents are real faults**: an OS-level packet drop, a duplicate packet,
+  or a ping timeout wrecks a vehicle — spin-out, smoke, debris, skid marks,
+  and a warning label; cleared after 10 s.
+- **Power-line pulses** are long-lived sockets (websockets/push channels),
+  carrying the owning app's logo down the wire.
+- **Time & weather are real**: day/golden hour/night follow your clock (the
+  sun arcs east→west), and rain/snow follow your local weather.
+- Painted lane labels mark the **IN · DOWNLOAD** and **OUT · UPLOAD**
+  roadways; exit gantries name where your traffic is headed (Google,
+  Cloudflare, GitHub…).
 
 ## Privacy & security
 
@@ -106,8 +143,11 @@ so scaled and mixed-DPI setups place correctly.
 
 ## Notes
 
-- If the badge shows `NO CAPTURE — run as admin`, the server wasn't elevated;
-  use `start.bat` (it self-elevates) — it falls back to demo traffic otherwise.
+- Without admin the backend runs **lite-live**: real adapter counters set the
+  rates and the real connection table supplies endpoints + owning apps; only
+  individual packet boundaries are interpolated (the badge says
+  `LIVE · net counters · no-admin`). Full per-packet capture needs one UAC
+  accept for `pktmon`.
 - After a display-resolution change Windows may rebuild the desktop layers;
   just run `start.bat` again.
 - QUIC is detected as UDP/443, HTTPS as TCP/443, DNS as port 53, SSH as 22.

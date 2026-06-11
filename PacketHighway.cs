@@ -436,6 +436,8 @@ namespace PacketHighway
     {
         public static volatile int PingMs = -1;
         public static long LinkBps;        // adapter link speed, bits/s
+        static long _lastFault = -1;       // discarded/errored packet counter watermark
+        static bool _pingOk = true;
 
         class Srv { public long Pkts; public DateTime Last; public string App; public string Icon; public string Host; public bool Resolving; }
         static readonly ConcurrentDictionary<string, Srv> _servers = new ConcurrentDictionary<string, Srv>();
@@ -474,15 +476,28 @@ namespace PacketHighway
                         }
                     }
                     catch { PingMs = -1; }
+                    // ping went from healthy to lost -> accident on the highway
+                    bool ok = PingMs >= 0;
+                    if (_pingOk && !ok) Hub.Broadcast("acc", "{\"kind\":\"loss\",\"n\":1}");
+                    _pingOk = ok;
                     try
                     {
-                        long best = 0;
+                        long best = 0, fault = 0;
                         foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                             if (ni.OperationalStatus == OperationalStatus.Up &&
                                 ni.NetworkInterfaceType != NetworkInterfaceType.Loopback &&
-                                ni.GetIPProperties().GatewayAddresses.Count > 0 && ni.Speed > best)
-                                best = ni.Speed;
+                                ni.GetIPProperties().GatewayAddresses.Count > 0)
+                            {
+                                if (ni.Speed > best) best = ni.Speed;
+                                var st = ni.GetIPv4Statistics();
+                                fault += st.IncomingPacketsDiscarded + st.IncomingPacketsWithErrors
+                                       + st.OutgoingPacketsDiscarded;
+                            }
                         LinkBps = best;
+                        // OS-level discarded/errored packets since last poll -> accident
+                        if (_lastFault >= 0 && fault > _lastFault)
+                            Hub.Broadcast("acc", "{\"kind\":\"drop\",\"n\":" + (fault - _lastFault) + "}");
+                        _lastFault = fault;
                     }
                     catch { }
                     Thread.Sleep(5000);
@@ -566,6 +581,7 @@ namespace PacketHighway
         static Process _proc;
         static readonly Queue<long> _seenGroups = new Queue<long>();
         static readonly HashSet<long> _seenSet = new HashSet<long>();
+        static DateTime _lastDup = DateTime.MinValue;
 
         public static void RefreshLocalIps()
         {
@@ -667,7 +683,16 @@ namespace PacketHighway
             if (g.Success)
             {
                 long id = long.Parse(g.Groups[1].Value);
-                if (_seenSet.Contains(id)) return;
+                if (_seenSet.Contains(id))
+                {
+                    // same PktGroupId again = duplicate packet on the wire
+                    if ((DateTime.UtcNow - _lastDup).TotalSeconds > 15)
+                    {
+                        _lastDup = DateTime.UtcNow;
+                        Hub.Broadcast("acc", "{\"kind\":\"dup\",\"n\":1}");
+                    }
+                    return;
+                }
                 _seenSet.Add(id); _seenGroups.Enqueue(id);
                 if (_seenGroups.Count > 2048) _seenSet.Remove(_seenGroups.Dequeue());
             }
@@ -821,6 +846,165 @@ namespace PacketHighway
         }
     }
 
+    // ------------------------------------------------------- system stats
+    // cpu/ram/disk/gpu telemetry for the utilities district + the process
+    // skyline (no admin required for any of these)
+
+    static class Sys
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct MEMSTAT
+        {
+            public uint Len; public uint Load;
+            public ulong TotalPhys, AvailPhys, TotalPage, AvailPage, TotalVirt, AvailVirt, AvailExt;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GlobalMemoryStatusEx(ref MEMSTAT m);
+
+        public static void Start()
+        {
+            var t = new Thread(Run); t.IsBackground = true; t.Start();
+            var t2 = new Thread(Procs); t2.IsBackground = true; t2.Start();
+        }
+
+        static void Run()
+        {
+            PerformanceCounter cpu = null, dr = null, dw = null;
+            try { cpu = new PerformanceCounter("Processor", "% Processor Time", "_Total"); cpu.NextValue(); } catch { }
+            try { dr = new PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec", "_Total"); dr.NextValue(); } catch { }
+            try { dw = new PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", "_Total"); dw.NextValue(); } catch { }
+            var gpu = new List<PerformanceCounter>();
+            DateTime gpuRefresh = DateTime.MinValue;
+
+            while (true)
+            {
+                Thread.Sleep(2000);
+                try
+                {
+                    double c = -1, rd = 0, wr = 0, g = -1;
+                    try { if (cpu != null) c = cpu.NextValue(); } catch { }
+                    try { if (dr != null) rd = dr.NextValue(); } catch { }
+                    try { if (dw != null) wr = dw.NextValue(); } catch { }
+
+                    // GPU 3D engine utilization: per-process instances churn, so the
+                    // counter set is rebuilt every 30 s and sampled continuously
+                    try
+                    {
+                        if ((DateTime.UtcNow - gpuRefresh).TotalSeconds > 30)
+                        {
+                            gpuRefresh = DateTime.UtcNow;
+                            foreach (var pc in gpu) try { pc.Dispose(); } catch { }
+                            gpu.Clear();
+                            var cat = new PerformanceCounterCategory("GPU Engine");
+                            foreach (var inst in cat.GetInstanceNames())
+                                if (inst.EndsWith("engtype_3D"))
+                                    gpu.Add(new PerformanceCounter("GPU Engine", "Utilization Percentage", inst));
+                            foreach (var pc in gpu) try { pc.NextValue(); } catch { }
+                        }
+                        else if (gpu.Count > 0)
+                        {
+                            double sum = 0;
+                            foreach (var pc in gpu) try { sum += pc.NextValue(); } catch { }
+                            g = Math.Min(100, sum);
+                        }
+                    }
+                    catch { g = -1; }
+
+                    var ms = new MEMSTAT(); ms.Len = (uint)Marshal.SizeOf(typeof(MEMSTAT));
+                    double ramUsed = 0, ramTotal = 0, ramPct = 0;
+                    if (GlobalMemoryStatusEx(ref ms))
+                    {
+                        ramTotal = ms.TotalPhys / 1073741824.0;
+                        ramUsed = (ms.TotalPhys - ms.AvailPhys) / 1073741824.0;
+                        ramPct = ms.Load;
+                    }
+
+                    double duPct = 0;
+                    try
+                    {
+                        var di = new DriveInfo(Path.GetPathRoot(Environment.SystemDirectory));
+                        duPct = 100.0 * (di.TotalSize - di.TotalFreeSpace) / di.TotalSize;
+                    }
+                    catch { }
+
+                    var ci = CultureInfo.InvariantCulture;
+                    Hub.Broadcast("sys", "{\"cpu\":" + ((int)c) + ",\"gpu\":" + ((int)g) +
+                        ",\"ramPct\":" + ((int)ramPct) +
+                        ",\"ramUsed\":" + ramUsed.ToString("0.0", ci) + ",\"ramTotal\":" + ramTotal.ToString("0.0", ci) +
+                        ",\"disk\":" + ((int)duPct) + ",\"dr\":" + ((long)rd) + ",\"dw\":" + ((long)wr) + "}");
+                }
+                catch { }
+            }
+        }
+
+        // top processes by working set -> the skyline; per-process CPU from
+        // TotalProcessorTime deltas between polls
+        class PSnap { public TimeSpan Cpu; public DateTime At; }
+        static readonly Dictionary<int, PSnap> _prev = new Dictionary<int, PSnap>();
+
+        static void Procs()
+        {
+            while (true)
+            {
+                Thread.Sleep(4000);
+                try
+                {
+                    var agg = new Dictionary<string, double[]>(); // name -> [ramMB, cpuPct]
+                    var seen = new HashSet<int>();
+                    foreach (var p in Process.GetProcesses())
+                    {
+                        try
+                        {
+                            long ws = p.WorkingSet64;
+                            if (ws < 40L * 1048576) continue; // skyline shows the heavyweights
+                            string n = p.ProcessName;
+                            if (n == "Idle" || n == "System" || n == "Memory Compression") continue;
+                            double cpuPct = 0;
+                            try
+                            {
+                                var nowT = DateTime.UtcNow;
+                                var tt = p.TotalProcessorTime;
+                                PSnap s;
+                                seen.Add(p.Id);
+                                if (_prev.TryGetValue(p.Id, out s))
+                                {
+                                    double el = (nowT - s.At).TotalSeconds;
+                                    if (el > 0.5)
+                                        cpuPct = (tt - s.Cpu).TotalSeconds / el * 100.0 / Environment.ProcessorCount;
+                                }
+                                _prev[p.Id] = new PSnap { Cpu = tt, At = nowT };
+                            }
+                            catch { }
+                            double[] v;
+                            if (!agg.TryGetValue(n, out v)) agg[n] = v = new double[2];
+                            v[0] += ws / 1048576.0;
+                            v[1] += cpuPct;
+                        }
+                        catch { }
+                        finally { try { p.Dispose(); } catch { } }
+                    }
+                    var deadKeys = new List<int>();
+                    foreach (var k in _prev.Keys) if (!seen.Contains(k)) deadKeys.Add(k);
+                    foreach (var k in deadKeys) _prev.Remove(k);
+
+                    var top = agg.OrderByDescending(kv => kv.Value[0]).Take(30).ToList();
+                    var sb = new StringBuilder("[");
+                    var ci = CultureInfo.InvariantCulture;
+                    for (int i = 0; i < top.Count; i++)
+                    {
+                        if (i > 0) sb.Append(',');
+                        sb.Append("{\"n\":" + Json.Str(top[i].Key) +
+                                  ",\"ram\":" + ((int)top[i].Value[0]) +
+                                  ",\"cpu\":" + top[i].Value[1].ToString("0.0", ci) + "}");
+                    }
+                    sb.Append(']');
+                    Hub.Broadcast("procs", sb.ToString());
+                }
+                catch { }
+            }
+        }
+    }
+
     // ------------------------------------------------------- lite-live mode
     // No-admin "real data": real adapter packet/byte counters set the rates,
     // the real TCP connection table supplies endpoints + owning apps. Only
@@ -942,6 +1126,12 @@ namespace PacketHighway
                             Wire = rnd.Next(7) == 0,
                             T = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                         });
+                    }
+                    // a synthetic wreck now and then so demo mode shows the feature
+                    if (rnd.Next(180) == 0)
+                    {
+                        string[] kinds = { "drop", "dup", "loss" };
+                        Hub.Broadcast("acc", "{\"kind\":\"" + kinds[rnd.Next(kinds.Length)] + "\",\"n\":" + (1 + rnd.Next(4)) + "}");
                     }
                     Thread.Sleep(150 + rnd.Next(500));
                 }
@@ -1144,6 +1334,7 @@ namespace PacketHighway
             Pipe.Start();
             NetInfo.Start();
             Weather.Start();
+            Sys.Start();
             Server.Start(port, webDir);
 
             if (demo) Demo.Start();
