@@ -1387,7 +1387,7 @@
   street(72, -27, 4.5, 30, false);    // avenue end caps
   street(72, -149, 4.5, 30, false);
 
-  var shuttles = [], lastShuttleAt = 0;
+  var shuttles = [], lastShuttleAt = 0, lastExitAt = 0;
   function towerFor(key) {
     for (var ti2 = 0; ti2 < appCity.length; ti2++) if (appCity[ti2].key === key) return appCity[ti2];
     return null;
@@ -1432,7 +1432,7 @@
   (function flyover() {
     var pts = [new THREE.Vector3(-26.5, 0, -114)].concat(EXIT_PTS);
     var rc = pathCurve(pts);
-    scene.add(roadRibbon(rc.c, 5.2, new THREE.MeshLambertMaterial({ color: 0x161b29, side: THREE.DoubleSide }), 40));
+    scene.add(roadRibbon(rc.c, 6.2, new THREE.MeshLambertMaterial({ color: 0x161b29, side: THREE.DoubleSide }), 40));
     [0.3, 0.5, 0.7].forEach(function (t) { // support pylons under the deck
       var p = rc.c.getPointAt(t);
       if (p.y < 0.8) return;
@@ -1823,24 +1823,6 @@
       }
       if (c.icon) c.icon.position.y = c.h + 1.9 + Math.sin(now * 0.0024 + c.flashT) * 0.12;
 
-      // inbound packets for a known app take the flyover exit and deliver
-      // to their tower — a sweeping elevated curve, no right-angle turns
-      if (!c.exitChecked && c.dir === 1 && c.group.position.z > -118) {
-        c.exitChecked = true;
-        var tw = c.pkt.icon ? towerFor(c.pkt.icon) : null;
-        if (tw && tw.grp.position.z >= -63 && shuttles.length < 9 && Math.random() < 0.65) {
-          var tz2 = tw.grp.position.z;
-          var p0 = c.group.position.clone(); p0.y = 0;
-          removeCar(c);
-          scene.add(c.group);
-          var pts2 = [p0].concat(EXIT_PTS.map(function (e) { return e.clone(); }));
-          pts2.push(new THREE.Vector3(-58, 0, tz2 - 8));
-          pts2.push(new THREE.Vector3(-63, 0, tz2));
-          pts2.push(new THREE.Vector3(-68, 0, tz2));
-          shuttles.push({ g: c.group, path: pathCurve(pts2), s: 0, speed: 12 });
-          continue;
-        }
-      }
       if ((c.dir === 1 && c.group.position.z > Z1 + 60) || (c.dir === -1 && c.group.position.z < Z0 - 60))
         removeCar(c); // far onto the continuation slab, deep in the fog
     }
@@ -2450,9 +2432,10 @@
     rain: function (lvl) { envRain = lvl == null ? 0.7 : lvl; applyEnvironment(); },
     crash: function (k, n) { lastAcc = 0; accident(k || 'drop', n || 3); },
     crashCount: function () { return crashes.length; },
-    cam: function (yaw, pitch, dist, tz) {
+    cam: function (yaw, pitch, dist, tz, tx) {
       camYaw = yaw; camPitch = pitch; camDist = dist;
       if (tz != null) camTarget.z = tz;
+      if (tx != null) camTarget.x = tx;
       applyCamera();
     },
     env: function () {
@@ -2574,9 +2557,9 @@
       var map2 = dayMode ? t2.bodyDay : t2.body;
       if (t2.mesh.material.map !== map2) { t2.mesh.material.map = map2; t2.mesh.material.needsUpdate = true; }
     });
-    skylineMats.forEach(function (m2) {
+    skylineMats.forEach(function (m2) { // night depth-seller; nearly gone by day
       m2.color.setScalar(1 + envDayW * 1.6);
-      m2.opacity = 1 - envDayW * 0.15;
+      m2.opacity = 1 - envDayW * 0.88;
     });
     ground.material.color.set(0x05070d).lerp(new THREE.Color(0x5d6873), envDayW);
     roofMat.color.set(0x222936).lerp(new THREE.Color(0x7e8792), envDayW);
