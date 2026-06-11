@@ -1392,6 +1392,55 @@
     for (var ti2 = 0; ti2 < appCity.length; ti2++) if (appCity[ti2].key === key) return appCity[ti2];
     return null;
   }
+  // smooth curved paths (no sharp right-angle turns): every surface-street
+  // route is a Catmull-Rom spline and cars steer along the tangent
+  function pathCurve(pts) {
+    var c = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.15);
+    c.arcLengthDivisions = 80;
+    return { c: c, len: c.getLength() };
+  }
+  // the interchange flyover: an elevated sweeping ramp off the IN roadway
+  // down to the app-city avenue (deliveries ride over the shoulder, not
+  // through a 90-degree corner)
+  var EXIT_PTS = [
+    new THREE.Vector3(-29, 1.2, -102),
+    new THREE.Vector3(-35, 3.4, -93),
+    new THREE.Vector3(-44, 4.2, -88),
+    new THREE.Vector3(-52, 2.6, -86),
+    new THREE.Vector3(-57, 0.6, -82),
+    new THREE.Vector3(-58, 0, -72)
+  ];
+  function roadRibbon(curve, width, mat, segs) {
+    var pos = [], idx = [];
+    for (var i = 0; i <= segs; i++) {
+      var t = i / segs;
+      var p = curve.getPointAt(t);
+      var tg = curve.getTangentAt(t);
+      var nx = -tg.z, nz = tg.x;
+      var nl = Math.sqrt(nx * nx + nz * nz) || 1;
+      nx /= nl; nz /= nl;
+      pos.push(p.x + nx * width / 2, p.y + 0.05, p.z + nz * width / 2,
+               p.x - nx * width / 2, p.y + 0.05, p.z - nz * width / 2);
+      if (i < segs) { var a2 = i * 2; idx.push(a2, a2 + 1, a2 + 2, a2 + 1, a2 + 3, a2 + 2); }
+    }
+    var rg = new THREE.BufferGeometry();
+    rg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    rg.setIndex(idx);
+    rg.computeVertexNormals();
+    return new THREE.Mesh(rg, mat);
+  }
+  (function flyover() {
+    var pts = [new THREE.Vector3(-26.5, 0, -114)].concat(EXIT_PTS);
+    var rc = pathCurve(pts);
+    scene.add(roadRibbon(rc.c, 5.2, new THREE.MeshLambertMaterial({ color: 0x161b29, side: THREE.DoubleSide }), 40));
+    [0.3, 0.5, 0.7].forEach(function (t) { // support pylons under the deck
+      var p = rc.c.getPointAt(t);
+      if (p.y < 0.8) return;
+      var py = new THREE.Mesh(new THREE.BoxGeometry(1.2, p.y, 1.2), poleMat);
+      py.position.set(p.x, p.y / 2, p.z);
+      scene.add(py);
+    });
+  })();
   function spawnShuttle() {
     if (!TEMPLATES.other || !appCity.length || shuttles.length >= 6) return;
     var t = appCity[(Math.random() * appCity.length) | 0];
@@ -1414,22 +1463,17 @@
     }
     g.position.copy(pts[0]);
     scene.add(g);
-    shuttles.push({ g: g, pts: pts, seg: 0, d: 0, speed: 8.5 });
+    shuttles.push({ g: g, path: pathCurve(pts), s: 0, speed: 8.5 });
   }
   function stepShuttles(dt) {
     for (var i = shuttles.length - 1; i >= 0; i--) {
       var s = shuttles[i];
-      var a = s.pts[s.seg], b = s.pts[s.seg + 1];
-      var segLen = a.distanceTo(b);
-      s.d += s.speed * dt;
-      if (s.d >= segLen) {
-        s.d = 0; s.seg++;
-        if (s.seg >= s.pts.length - 1) { scene.remove(s.g); shuttles.splice(i, 1); continue; }
-        a = s.pts[s.seg]; b = s.pts[s.seg + 1];
-      }
-      var k2 = s.d / Math.max(0.001, a.distanceTo(b));
-      s.g.position.lerpVectors(a, b, k2);
-      s.g.rotation.y = Math.atan2(b.x - a.x, b.z - a.z) + Math.PI; // model forward is -z
+      s.s += s.speed * dt;
+      if (s.s >= s.path.len) { scene.remove(s.g); shuttles.splice(i, 1); continue; }
+      var t = s.s / s.path.len;
+      s.g.position.copy(s.path.c.getPointAt(t));
+      var tg = s.path.c.getTangentAt(t);
+      s.g.rotation.y = Math.atan2(tg.x, tg.z) + Math.PI; // model forward is -z
     }
   }
 
@@ -1779,24 +1823,21 @@
       }
       if (c.icon) c.icon.position.y = c.h + 1.9 + Math.sin(now * 0.0024 + c.flashT) * 0.12;
 
-      // inbound packets for a known app take the interchange exit and
-      // deliver to their tower instead of vanishing at the road end
-      if (!c.exitChecked && c.dir === 1 && c.group.position.z > -92) {
+      // inbound packets for a known app take the flyover exit and deliver
+      // to their tower — a sweeping elevated curve, no right-angle turns
+      if (!c.exitChecked && c.dir === 1 && c.group.position.z > -118) {
         c.exitChecked = true;
         var tw = c.pkt.icon ? towerFor(c.pkt.icon) : null;
-        if (tw && shuttles.length < 9 && Math.random() < 0.65) {
+        if (tw && tw.grp.position.z >= -63 && shuttles.length < 9 && Math.random() < 0.65) {
           var tz2 = tw.grp.position.z;
           var p0 = c.group.position.clone(); p0.y = 0;
           removeCar(c);
           scene.add(c.group);
-          shuttles.push({
-            g: c.group, seg: 0, d: 0, speed: 11,
-            pts: [p0,
-              new THREE.Vector3(-40, 0, -89),
-              new THREE.Vector3(-58, 0, -89),
-              new THREE.Vector3(-58, 0, tz2),
-              new THREE.Vector3(-67, 0, tz2)]
-          });
+          var pts2 = [p0].concat(EXIT_PTS.map(function (e) { return e.clone(); }));
+          pts2.push(new THREE.Vector3(-58, 0, tz2 - 8));
+          pts2.push(new THREE.Vector3(-63, 0, tz2));
+          pts2.push(new THREE.Vector3(-68, 0, tz2));
+          shuttles.push({ g: c.group, path: pathCurve(pts2), s: 0, speed: 12 });
           continue;
         }
       }
