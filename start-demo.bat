@@ -1,5 +1,5 @@
 @echo off
-rem start-demo.bat — synthetic traffic, no admin needed, opens in a normal browser tab
+rem start-demo.bat - synthetic traffic, no admin needed, opens in a normal browser tab
 cd /d "%~dp0"
 if not exist PacketHighway.exe call build.bat
 if errorlevel 1 (

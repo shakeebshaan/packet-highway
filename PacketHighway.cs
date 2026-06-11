@@ -38,6 +38,7 @@ namespace PacketHighway
         public string App;     // process name or null
         public string Icon;    // icon cache key or null
         public string Cargo;   // media audio data text lookup control (heuristic) or null
+        public string Dest;    // destination company name (prefix/rDNS heuristic) or null
         public long T;         // unix ms
     }
 
@@ -64,7 +65,7 @@ namespace PacketHighway
                  + ",\"src\":" + Str(p.Src) + ",\"dst\":" + Str(p.Dst)
                  + ",\"sport\":" + p.SPort + ",\"dport\":" + p.DPort
                  + ",\"app\":" + Str(p.App) + ",\"icon\":" + Str(p.Icon)
-                 + ",\"cargo\":" + Str(p.Cargo) + ",\"t\":" + p.T + "}";
+                 + ",\"cargo\":" + Str(p.Cargo) + ",\"dest\":" + Str(p.Dest) + ",\"t\":" + p.T + "}";
         }
     }
 
@@ -89,6 +90,9 @@ namespace PacketHighway
         static volatile Dictionary<int, int> _tcp = new Dictionary<int, int>();
         static volatile Dictionary<int, int> _udp = new Dictionary<int, int>();
 
+        public class Conn { public string RemoteIp; public int RemotePort; public int LocalPort; public int Pid; }
+        public static volatile List<Conn> Conns = new List<Conn>();
+
         public static void Start()
         {
             var t = new Thread(() =>
@@ -109,18 +113,22 @@ namespace PacketHighway
         {
             var tcp = new Dictionary<int, int>();
             var udp = new Dictionary<int, int>();
-            // TCP v4: rows of 6 DWORDs; state@0 localAddr@4 localPort@8 ... pid@20
-            ReadTable(true, AF_INET, 24, 8, 20, tcp);
-            // TCP v6: addr16 scope4 port4 addr16 scope4 port4 state4 pid4 => port@20 pid@52
-            ReadTable(true, AF_INET6, 56, 20, 52, tcp);
+            var conns = new List<Conn>();
+            // TCP v4: rows of 6 DWORDs; state@0 localAddr@4 localPort@8 remoteAddr@12 remotePort@16 pid@20
+            ReadTable(true, AF_INET, 24, 8, 20, tcp, conns, 12, 16);
+            // TCP v6: addr16 scope4 port4 addr16 scope4 port4 state4 pid4 => port@20 pid@52 remote@24 rport@44
+            ReadTable(true, AF_INET6, 56, 20, 52, tcp, conns, 24, 44);
             // UDP v4: addr4 port4 pid4 => port@4 pid@8
-            ReadTable(false, AF_INET, 12, 4, 8, udp);
+            ReadTable(false, AF_INET, 12, 4, 8, udp, null, 0, 0);
             // UDP v6: addr16 scope4 port4 pid4 => port@20 pid@24
-            ReadTable(false, AF_INET6, 28, 20, 24, udp);
-            _tcp = tcp; _udp = udp;
+            ReadTable(false, AF_INET6, 28, 20, 24, udp, null, 0, 0);
+            _tcp = tcp; _udp = udp; Conns = conns;
         }
 
-        static void ReadTable(bool isTcp, int af, int rowSize, int portOff, int pidOff, Dictionary<int, int> into)
+        static int Ntohs(int raw) { return ((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF); }
+
+        static void ReadTable(bool isTcp, int af, int rowSize, int portOff, int pidOff,
+                              Dictionary<int, int> into, List<Conn> conns, int remoteOff, int remotePortOff)
         {
             int size = 0;
             if (isTcp) GetExtendedTcpTable(IntPtr.Zero, ref size, false, af, TCP_TABLE_OWNER_PID_ALL, 0);
@@ -137,10 +145,31 @@ namespace PacketHighway
                 IntPtr row = buf + 4;
                 for (int i = 0; i < n; i++)
                 {
-                    int rawPort = Marshal.ReadInt32(row, portOff);
-                    int port = ((rawPort & 0xFF) << 8) | ((rawPort >> 8) & 0xFF); // ntohs
+                    int port = Ntohs(Marshal.ReadInt32(row, portOff));
                     int pid = Marshal.ReadInt32(row, pidOff);
                     if (port != 0 && !into.ContainsKey(port)) into[port] = pid;
+
+                    if (conns != null) // collect established remote endpoints (lite-live mode)
+                    {
+                        int rport = Ntohs(Marshal.ReadInt32(row, remotePortOff));
+                        if (rport != 0)
+                        {
+                            string rip = null;
+                            if (af == AF_INET)
+                            {
+                                var b4 = new byte[4]; Marshal.Copy(row + remoteOff, b4, 0, 4);
+                                if (!(b4[0] == 0 || b4[0] == 127)) rip = new System.Net.IPAddress(b4).ToString();
+                            }
+                            else
+                            {
+                                var b16 = new byte[16]; Marshal.Copy(row + remoteOff, b16, 0, 16);
+                                bool zero = true; for (int k = 0; k < 16; k++) if (b16[k] != 0) { zero = false; break; }
+                                if (!zero && b16[0] != 0xfe) rip = new System.Net.IPAddress(b16).ToString();
+                            }
+                            if (rip != null && rip != "::1")
+                                conns.Add(new Conn { RemoteIp = rip, RemotePort = rport, LocalPort = port, Pid = pid });
+                        }
+                    }
                     row += rowSize;
                 }
             }
@@ -249,6 +278,15 @@ namespace PacketHighway
             if (shown) Interlocked.Increment(ref Shown);
         }
 
+        // bulk-add packets that are counted but not individually visualized
+        public static void Bulk(bool inDir, long pkts, long bytes)
+        {
+            if (pkts <= 0) return;
+            if (inDir) { Interlocked.Add(ref PktsIn, pkts); Interlocked.Add(ref BytesIn, bytes); }
+            else { Interlocked.Add(ref PktsOut, pkts); Interlocked.Add(ref BytesOut, bytes); }
+            Interlocked.Add(ref Total, pkts);
+        }
+
         public static void Start()
         {
             var t = new Thread(() =>
@@ -281,7 +319,9 @@ namespace PacketHighway
         public static void Push(Pkt p)
         {
             p.Cargo = CargoOf(p);
-            NetInfo.Touch(p.Dir == "out" ? p.Dst : p.Src, p.App, p.Icon);
+            string remote = p.Dir == "out" ? p.Dst : p.Src;
+            NetInfo.Touch(remote, p.App, p.Icon);
+            p.Dest = Dest.Of(remote, NetInfo.HostOf(remote));
             bool shown = _q.Count < MAX_VISUAL_PER_FLUSH * 4;
             Stats.Count(p, shown);
             if (shown) _q.Enqueue(p);
@@ -322,6 +362,51 @@ namespace PacketHighway
         }
     }
 
+    // ------------------------------------- destination naming (ambient flavor)
+
+    static class Dest
+    {
+        static readonly string[][] Prefix = {
+            new[]{"8.8.","Google"}, new[]{"142.250.","Google"}, new[]{"172.217.","Google"},
+            new[]{"216.58.","Google"}, new[]{"74.125.","Google"}, new[]{"64.233.","Google"},
+            new[]{"1.1.1.","Cloudflare"}, new[]{"1.0.0.","Cloudflare"}, new[]{"162.159.","Cloudflare"},
+            new[]{"104.16.","Cloudflare"}, new[]{"104.17.","Cloudflare"}, new[]{"104.18.","Cloudflare"},
+            new[]{"104.19.","Cloudflare"}, new[]{"104.20.","Cloudflare"},
+            new[]{"172.64.","Cloudflare"}, new[]{"172.65.","Cloudflare"}, new[]{"172.66.","Cloudflare"}, new[]{"172.67.","Cloudflare"},
+            new[]{"13.","Microsoft"}, new[]{"20.","Microsoft"}, new[]{"40.","Microsoft"},
+            new[]{"151.101.","Fastly"}, new[]{"199.232.","Fastly"},
+            new[]{"185.199.10","GitHub"}, new[]{"140.82.","GitHub"},
+            new[]{"3.","AWS"}, new[]{"18.","AWS"}, new[]{"54.","AWS"},
+            new[]{"17.","Apple"},
+            new[]{"31.13.","Meta"}, new[]{"157.240.","Meta"},
+            new[]{"23.","Akamai"}
+        };
+
+        public static string Of(string ip, string host)
+        {
+            if (!string.IsNullOrEmpty(host))
+            {
+                string h = host.ToLowerInvariant();
+                if (h.EndsWith("1e100.net") || h.Contains("google")) return "Google";
+                if (h.Contains("amazonaws") || h.Contains("cloudfront")) return "AWS";
+                if (h.Contains("cloudflare")) return "Cloudflare";
+                if (h.Contains("akamai")) return "Akamai";
+                if (h.Contains("azure") || h.Contains("microsoft") || h.Contains("msedge")) return "Microsoft";
+                if (h.Contains("fastly")) return "Fastly";
+                if (h.Contains("github")) return "GitHub";
+                if (h.Contains("fbcdn") || h.Contains("facebook")) return "Meta";
+                if (h.Contains("apple") || h.Contains("icloud")) return "Apple";
+                if (h.Contains("discord")) return "Discord";
+                if (h.Contains("spotify")) return "Spotify";
+                if (h.Contains("steam")) return "Steam";
+                if (h.Contains("netflix") || h.Contains("nflx")) return "Netflix";
+            }
+            if (ip == null) return null;
+            foreach (var p in Prefix) if (ip.StartsWith(p[0])) return p[1];
+            return null;
+        }
+    }
+
     // ------------------------------------------- ping / link / server tracking
 
     static class NetInfo
@@ -333,6 +418,12 @@ namespace PacketHighway
         static readonly ConcurrentDictionary<string, Srv> _servers = new ConcurrentDictionary<string, Srv>();
 
         public static int Count { get { return _servers.Count; } }
+
+        public static string HostOf(string ip)
+        {
+            Srv s;
+            return ip != null && _servers.TryGetValue(ip, out s) ? s.Host : null;
+        }
 
         public static void Touch(string ip, string app, string icon)
         {
@@ -381,7 +472,34 @@ namespace PacketHighway
                 while (true) { Thread.Sleep(4000); try { Broadcast(); } catch { } }
             });
             t2.IsBackground = true; t2.Start();
+
+            // auto-pause the wallpaper while a fullscreen app / game is up
+            var t3 = new Thread(() =>
+            {
+                int lastPause = -1;
+                while (true)
+                {
+                    Thread.Sleep(2000);
+                    try
+                    {
+                        int st;
+                        bool pause = SHQueryUserNotificationState(out st) == 0 &&
+                                     (st == 2 /*busy*/ || st == 3 /*d3d fullscreen*/ || st == 4 /*presentation*/);
+                        int pv = pause ? 1 : 0;
+                        if (pv != lastPause)
+                        {
+                            lastPause = pv;
+                            Hub.Broadcast("control", "{\"pause\":" + (pause ? "true" : "false") + "}");
+                        }
+                    }
+                    catch { }
+                }
+            });
+            t3.IsBackground = true; t3.Start();
         }
+
+        [DllImport("shell32.dll")]
+        static extern int SHQueryUserNotificationState(out int state);
 
         static void Broadcast()
         {
@@ -409,6 +527,7 @@ namespace PacketHighway
                 var s = top[i].Value;
                 if (i > 0) sb.Append(',');
                 sb.Append("{\"ip\":" + Json.Str(top[i].Key) + ",\"host\":" + Json.Str(string.IsNullOrEmpty(s.Host) ? null : s.Host)
+                        + ",\"name\":" + Json.Str(Dest.Of(top[i].Key, s.Host))
                         + ",\"app\":" + Json.Str(s.App) + ",\"icon\":" + Json.Str(s.Icon) + ",\"pkts\":" + s.Pkts + "}");
             }
             sb.Append("]}");
@@ -466,9 +585,15 @@ namespace PacketHighway
                 _proc.ErrorDataReceived += (s, e) => { if (e.Data != null) errSb.AppendLine(e.Data); };
                 _proc.BeginErrorReadLine();
 
+                // sample the first raw lines to disk so format mismatches are diagnosable
+                string samplePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "capture_sample.log");
+                try { File.Delete(samplePath); } catch { }
+                int sampled = 0;
+
                 string line;
                 while ((line = _proc.StandardOutput.ReadLine()) != null)
                 {
+                    if (sampled < 60) { sampled++; try { File.AppendAllText(samplePath, line + "\r\n"); } catch { } }
                     try { Parse(line); } catch { } // one bad line must not kill capture
                 }
 
@@ -618,6 +743,91 @@ namespace PacketHighway
         static int SafePort(string s) { int p; return int.TryParse(s, out p) && p <= 65535 ? p : 0; }
     }
 
+    // ------------------------------------------------------- lite-live mode
+    // No-admin "real data": real adapter packet/byte counters set the rates,
+    // the real TCP connection table supplies endpoints + owning apps. Only
+    // individual packet boundaries are interpolated (pktmon needs admin).
+
+    static class LiteLive
+    {
+        public static void Start()
+        {
+            Stats.Mode = "live"; Stats.Source = "net counters · no-admin";
+            var t = new Thread(Run); t.IsBackground = true; t.Start();
+        }
+
+        static void Run()
+        {
+            var rnd = new Random();
+            long pIn = -1, pOut = 0, bIn = 0, bOut = 0;
+            const int TICK_MS = 500, MAX_VISUAL_PER_TICK = 14;
+
+            while (true)
+            {
+                Thread.Sleep(TICK_MS);
+                long cIn = 0, cOut = 0, cbIn = 0, cbOut = 0;
+                try
+                {
+                    foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+                    {
+                        if (ni.OperationalStatus != OperationalStatus.Up ||
+                            ni.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                            ni.GetIPProperties().GatewayAddresses.Count == 0) continue;
+                        var st = ni.GetIPv4Statistics();
+                        cIn += st.UnicastPacketsReceived; cOut += st.UnicastPacketsSent;
+                        cbIn += st.BytesReceived; cbOut += st.BytesSent;
+                    }
+                }
+                catch { continue; }
+
+                if (pIn < 0) { pIn = cIn; pOut = cOut; bIn = cbIn; bOut = cbOut; continue; }
+                long dIn = Math.Max(0, cIn - pIn), dOut = Math.Max(0, cOut - pOut);
+                long dbIn = Math.Max(0, cbIn - bIn), dbOut = Math.Max(0, cbOut - bOut);
+                pIn = cIn; pOut = cOut; bIn = cbIn; bOut = cbOut;
+                if (dIn + dOut == 0) continue;
+
+                var conns = PortMap.Conns;
+                long visIn = Math.Min(dIn, MAX_VISUAL_PER_TICK / 2), visOut = Math.Min(dOut, MAX_VISUAL_PER_TICK / 2);
+                EmitSide(rnd, conns, true, visIn, dIn, dbIn);
+                EmitSide(rnd, conns, false, visOut, dOut, dbOut);
+            }
+        }
+
+        static void EmitSide(Random rnd, List<PortMap.Conn> conns, bool inDir, long vis, long pkts, long bytes)
+        {
+            if (pkts <= 0) return;
+            long meanSize = Math.Max(60, Math.Min(1500, bytes / pkts));
+            long visBytes = 0;
+            for (long i = 0; i < vis; i++)
+            {
+                int sz = (int)Math.Max(60, Math.Min(1500, meanSize * (0.4 + rnd.NextDouble() * 1.4)));
+                visBytes += sz;
+                var p = new Pkt
+                {
+                    Dir = inDir ? "in" : "out",
+                    Bytes = sz,
+                    T = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                };
+                if (conns != null && conns.Count > 0)
+                {
+                    var cn = conns[rnd.Next(conns.Count)];
+                    p.Src = inDir ? cn.RemoteIp : "this PC";
+                    p.Dst = inDir ? "this PC" : cn.RemoteIp;
+                    p.SPort = inDir ? cn.RemotePort : cn.LocalPort;
+                    p.DPort = inDir ? cn.LocalPort : cn.RemotePort;
+                    int svc = cn.RemotePort; // classify on the well-known side
+                    p.Proto = svc == 443 ? "https" : svc == 80 ? "http" : svc == 53 ? "dns" : svc == 22 ? "ssh" : "tcp";
+                    string name, icon; PortMap.Resolve(cn.Pid, out name, out icon);
+                    p.App = name; p.Icon = icon;
+                }
+                else p.Proto = "other";
+                Pipe.Push(p);
+            }
+            // remainder: counted in the dashboard, not drawn (sampling pct shows this)
+            Stats.Bulk(inDir, pkts - vis, Math.Max(0, bytes - visBytes));
+        }
+    }
+
     // --------------------------------------------------------------- demo
 
     static class Demo
@@ -730,10 +940,17 @@ namespace PacketHighway
                 var reader = new StreamReader(s, Encoding.ASCII, false, 4096, true);
                 string reqLine = reader.ReadLine();
                 if (reqLine == null) { client.Close(); return; }
-                string hdr; while ((hdr = reader.ReadLine()) != null && hdr.Length > 0) { }
+                int contentLength = 0;
+                string hdr;
+                while ((hdr = reader.ReadLine()) != null && hdr.Length > 0)
+                {
+                    if (hdr.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                        int.TryParse(hdr.Substring(15).Trim(), out contentLength);
+                }
 
                 var parts = reqLine.Split(' ');
                 if (parts.Length < 2) { client.Close(); return; }
+                string verb = parts[0];
                 string path = parts[1].Split('?')[0];
 
                 if (path == "/events")
@@ -745,6 +962,32 @@ namespace PacketHighway
                     s.Write(hello, 0, hello.Length); s.Flush();
                     Hub.Add(s);
                     return; // keep socket open; hub owns it now
+                }
+
+                if (path == "/layout")
+                {
+                    string layoutPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "layout.json");
+                    if (verb == "POST")
+                    {
+                        var buf = new char[Math.Min(contentLength, 65536)];
+                        int read = 0;
+                        while (read < buf.Length)
+                        {
+                            int n2 = reader.Read(buf, read, buf.Length - read);
+                            if (n2 <= 0) break;
+                            read += n2;
+                        }
+                        string body = new string(buf, 0, read);
+                        try { File.WriteAllText(layoutPath, body); } catch { }
+                        Hub.Broadcast("layout", body); // live-sync panel layout to the wallpaper
+                        Respond(s, "200 OK", "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"));
+                    }
+                    else
+                    {
+                        string json = File.Exists(layoutPath) ? File.ReadAllText(layoutPath) : "{}";
+                        Respond(s, "200 OK", "application/json", Encoding.UTF8.GetBytes(json));
+                    }
+                    client.Close(); return;
                 }
 
                 if (path.StartsWith("/icon/"))
@@ -824,8 +1067,9 @@ namespace PacketHighway
                     .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
                 if (!admin)
                 {
-                    Console.WriteLine("[warn] not elevated — pktmon will fail; falling back to DEMO mode");
-                    Demo.Start();
+                    Console.WriteLine("[warn] not elevated — using real net counters + connection table (lite-live)");
+                    Capture.RefreshLocalIps();
+                    LiteLive.Start();
                 }
                 else Capture.Start();
             }

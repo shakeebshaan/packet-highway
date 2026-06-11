@@ -306,6 +306,7 @@
     return new THREE.CanvasTexture(c);
   }
   var bTex = [buildingTexture(), buildingTexture(), buildingTexture(), buildingTexture()];
+  var bbCandidates = [];
   for (var b = 0; b < BUILDING_COUNT; b++) {
     var w = 14 + Math.random() * 26, h = 20 + Math.random() * 55, d = 14 + Math.random() * 26;
     var side = Math.random() < 0.5 ? -1 : 1;
@@ -321,7 +322,56 @@
     var bld = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
     bld.position.set(bx, h / 2 - 0.1, bz);
     scene.add(bld);
+    if (h > 40 && Math.abs(bx) < 150 && bz > -260 && bz < 20)
+      bbCandidates.push({ x: bx, h: h, w: w, d: d, z: bz });
   }
+
+  // living billboards: jumbotrons on the tallest road-facing buildings showing
+  // the top-talker apps (icon + relative traffic bar), redrawn every 5 s
+  var iconBytes = {}, bbImgCache = {};
+  var billboards = [];
+  bbCandidates.sort(function (a, b2) { return b2.h - a.h; }).slice(0, ECO ? 0 : 3).forEach(function (cd) {
+    var c = document.createElement('canvas'); c.width = 256; c.height = 256;
+    var tex = new THREE.CanvasTexture(c);
+    var size = Math.min(cd.w * 0.8, 13);
+    var m = new THREE.Mesh(new THREE.PlaneGeometry(size, size),
+      new THREE.MeshBasicMaterial({ map: tex }));
+    m.position.set(cd.x + (cd.x < 0 ? cd.w / 2 + 0.2 : -cd.w / 2 - 0.2), cd.h * 0.72, cd.z);
+    m.rotation.y = cd.x < 0 ? Math.PI / 2 : -Math.PI / 2;
+    scene.add(m);
+    billboards.push({ ctx: c.getContext('2d'), tex: tex });
+  });
+  function redrawBillboards() {
+    if (!billboards.length) return;
+    var top = Object.keys(iconBytes).sort(function (a, b2) { return iconBytes[b2] - iconBytes[a]; }).slice(0, 3);
+    var max = top.length ? iconBytes[top[0]] : 1;
+    billboards.forEach(function (bb) {
+      var g = bb.ctx;
+      g.fillStyle = '#070d18'; g.fillRect(0, 0, 256, 256);
+      g.strokeStyle = '#57b8e8'; g.lineWidth = 6; g.strokeRect(5, 5, 246, 246);
+      g.font = 'bold 19px Consolas, monospace'; g.fillStyle = '#6f8fb8'; g.textAlign = 'left';
+      g.fillText('NOW STREAMING', 18, 36);
+      top.forEach(function (key, i) {
+        var y = 60 + i * 64;
+        var img = bbImgCache[key];
+        if (!img) {
+          img = bbImgCache[key] = new Image();
+          img.src = '/icon/' + key + '.png';
+          img.onload = redrawBillboards;
+        }
+        if (img.complete && img.naturalWidth) g.drawImage(img, 18, y, 48, 48);
+        g.fillStyle = '#2a3a5c'; g.fillRect(80, y + 16, 158, 16);
+        g.fillStyle = '#4fd2ff'; g.fillRect(80, y + 16, Math.max(8, 158 * (iconBytes[key] / max)), 16);
+      });
+      if (!top.length) { g.fillStyle = '#33415e'; g.font = '17px Consolas'; g.fillText('no traffic yet', 18, 80); }
+      bb.tex.needsUpdate = true;
+    });
+    Object.keys(iconBytes).forEach(function (k) {
+      iconBytes[k] *= 0.8;
+      if (iconBytes[k] < 100) delete iconBytes[k];
+    });
+  }
+  setInterval(redrawBillboards, 5000);
 
   // distant parallax skyline silhouettes (camera drift sells the depth)
   (function skyline() {
@@ -387,16 +437,63 @@
     setInterval(redrawSign, 5000);
   })();
 
+  // exit gantries over the outbound lanes — show where traffic is headed
+  var destCounts = {};
+  var gantries = [];
+  (function exitGantries() {
+    [[-95, 'EXIT 12'], [-175, 'EXIT 25']].forEach(function (cfg) {
+      var c = document.createElement('canvas'); c.width = 512; c.height = 96;
+      var ctx = c.getContext('2d');
+      var tex = new THREE.CanvasTexture(c);
+      var board = new THREE.Mesh(new THREE.PlaneGeometry(20, 3.8),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+      board.position.set(13.5, 9.4, cfg[0]);
+      scene.add(board);
+      [4.6, 22.4].forEach(function (px) {
+        var pole = new THREE.Mesh(new THREE.BoxGeometry(0.4, 11, 0.4), poleMat);
+        pole.position.set(px, 5.5, cfg[0]); scene.add(pole);
+      });
+      var beam = new THREE.Mesh(new THREE.BoxGeometry(18.5, 0.5, 0.5), poleMat);
+      beam.position.set(13.5, 11.3, cfg[0]); scene.add(beam);
+      gantries.push({ ctx: ctx, tex: tex, label: cfg[1] });
+    });
+    setInterval(redrawGantries, 8000);
+    redrawGantries();
+  })();
+  function redrawGantries() {
+    var names = Object.keys(destCounts).sort(function (a, b) { return destCounts[b] - destCounts[a]; });
+    gantries.forEach(function (g2, i) {
+      var ctx = g2.ctx;
+      ctx.clearRect(0, 0, 512, 96);
+      ctx.fillStyle = 'rgba(8,30,20,0.94)'; ctx.fillRect(0, 0, 512, 96);
+      ctx.strokeStyle = '#3ad08a'; ctx.lineWidth = 4; ctx.strokeRect(4, 4, 504, 88);
+      ctx.font = '20px Consolas, monospace'; ctx.textBaseline = 'alphabetic';
+      ctx.textAlign = 'left'; ctx.fillStyle = '#7ce8b0';
+      ctx.fillText(g2.label, 18, 32);
+      var picks = names.slice(i * 2, i * 2 + 2);
+      ctx.font = 'bold 33px Consolas, monospace';
+      ctx.textAlign = 'center'; ctx.fillStyle = '#eafff2';
+      ctx.fillText(picks.length ? picks.join(' · ') : 'OPEN ROAD', 256, 72);
+      g2.tex.needsUpdate = true;
+    });
+    Object.keys(destCounts).forEach(function (k) {
+      destCounts[k] *= 0.55;
+      if (destCounts[k] < 0.5) delete destCounts[k];
+    });
+  }
+
   // ------------------------------------------------------------ vehicles
   var matCache = {};
   function lambert(color) {
-    if (!matCache[color]) matCache[color] = new THREE.MeshLambertMaterial({ color: color });
+    // self-emissive accent keeps protocol colors saturated under the ACES grade
+    if (!matCache[color]) matCache[color] = new THREE.MeshLambertMaterial({ color: color, emissive: color, emissiveIntensity: 0.22 });
     return matCache[color];
   }
   var MAT = {
-    glass: new THREE.MeshLambertMaterial({ color: 0x0d1422, emissive: 0x202c44, emissiveIntensity: 0.6 }),
-    head: new THREE.MeshBasicMaterial({ color: 0xfff6d8 }),
+    glass: new THREE.MeshLambertMaterial({ color: 0x0d1422, emissive: 0x202c44, emissiveIntensity: 0.85 }),
+    head: new THREE.MeshBasicMaterial({ color: 0xfff2c4 }),
     tail: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
+    tailBright: new THREE.MeshBasicMaterial({ color: 0xff5040 }),
     tire: new THREE.MeshLambertMaterial({ color: 0x090a0e }),
     dark: new THREE.MeshLambertMaterial({ color: 0x10141e }),
     red: new THREE.MeshBasicMaterial({ color: 0xff2a3c }),
@@ -420,7 +517,7 @@
       box(g, 2.5, 2.5, 9, c, 0, 1.7, 0);
       box(g, 2.54, 0.9, 7.6, MAT.glass, 0, 2.45, 0.2);
       box(g, 2.2, 0.5, 0.1, MAT.head, 0, 1.1, -4.51);
-      box(g, 2.2, 0.4, 0.1, MAT.tail, 0, 1.2, 4.51);
+      box(g, 2.2, 0.4, 0.1, MAT.tail, 0, 1.2, 4.51).name = 'tail';
       wheels(g, 2.1, 9, 0.5);
       return g;
     },
@@ -430,7 +527,7 @@
       box(g, 1.9, 0.45, 2.0, MAT.glass, 0, 1.12, 0.2);
       box(g, 1.7, 0.18, 0.4, c, 0, 1.0, 2.0); // spoiler
       box(g, 1.7, 0.22, 0.08, MAT.head, 0, 0.62, -2.12);
-      box(g, 1.7, 0.2, 0.08, MAT.tail, 0, 0.66, 2.12);
+      box(g, 1.7, 0.2, 0.08, MAT.tail, 0, 0.66, 2.12).name = 'tail';
       wheels(g, 1.8, 4.2, 0.38);
       return g;
     },
@@ -440,7 +537,7 @@
       box(g, 2.2, 1.5, 2.2, MAT.dark, 0, 1.0, -2.7);          // cab
       box(g, 2.1, 0.6, 0.1, MAT.glass, 0, 1.45, -3.8);
       box(g, 1.9, 0.3, 0.1, MAT.head, 0, 0.65, -3.82);
-      box(g, 2.2, 0.4, 0.1, MAT.tail, 0, 1.0, 3.95);
+      box(g, 2.2, 0.4, 0.1, MAT.tail, 0, 1.0, 3.95).name = 'tail';
       wheels(g, 2.0, 8, 0.5);
       return g;
     },
@@ -464,7 +561,7 @@
       box(g, 2.2, 1.9, 5.6, c, 0, 1.35, 0);
       box(g, 2.24, 0.6, 1.4, MAT.glass, 0, 1.8, -1.7);
       box(g, 1.9, 0.3, 0.1, MAT.head, 0, 0.7, -2.81);
-      box(g, 1.9, 0.35, 0.1, MAT.tail, 0, 0.9, 2.81);
+      box(g, 1.9, 0.35, 0.1, MAT.tail, 0, 0.9, 2.81).name = 'tail';
       wheels(g, 1.9, 5.6, 0.42);
       return g;
     },
@@ -488,7 +585,7 @@
       box(g, 2.0, 0.8, 3.8, c, 0, 0.85, 0);
       box(g, 1.9, 0.7, 1.9, MAT.glass, 0, 1.55, 0.4);
       box(g, 1.7, 0.26, 0.1, MAT.head, 0, 0.75, -1.91);
-      box(g, 1.7, 0.26, 0.1, MAT.tail, 0, 0.85, 1.91);
+      box(g, 1.7, 0.26, 0.1, MAT.tail, 0, 0.85, 1.91).name = 'tail';
       wheels(g, 1.7, 3.8, 0.38);
       return g;
     }
@@ -498,7 +595,7 @@
     box(g, 2.1, 0.75, 4.6, c, 0, 0.85, 0);
     box(g, 1.95, 0.65, 2.3, MAT.glass, 0, 1.55, 0.1);
     box(g, 1.8, 0.26, 0.1, MAT.head, 0, 0.75, -2.31);
-    box(g, 1.8, 0.26, 0.1, MAT.tail, 0, 0.85, 2.31);
+    box(g, 1.8, 0.26, 0.1, MAT.tail, 0, 0.85, 2.31).name = 'tail';
     wheels(g, 1.8, 4.6, 0.4);
     return g;
   }
@@ -506,10 +603,38 @@
   // one template per vehicle type; clones share geometries and materials,
   // so spawning never allocates GPU resources (critical for a 24/7 wallpaper)
   var TEMPLATES = {};
+  // neon ribbon trails on the fast movers (built once per template, clones share)
+  var TRAIL = { quic: { len: 10, color: 0xff2d5e }, dns: { len: 6.5, color: 0xffd84f } };
+  var trailTexCache = null;
+  function trailTexture() {
+    if (trailTexCache) return trailTexCache;
+    var c = document.createElement('canvas'); c.width = 64; c.height = 8;
+    var g = c.getContext('2d');
+    var grad = g.createLinearGradient(0, 0, 64, 0);
+    grad.addColorStop(0, 'rgba(255,255,255,0.85)'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 64, 8);
+    trailTexCache = new THREE.CanvasTexture(c);
+    return trailTexCache;
+  }
   function getTemplate(proto) {
     var key = proto in FACTORY ? proto : 'other';
     if (!TEMPLATES[key]) {
       var g = FACTORY[key]();
+      var tr = TRAIL[key];
+      if (tr) {
+        var geo = new THREE.PlaneGeometry(tr.len, 1.0);
+        geo.rotateY(Math.PI / 2); // plane local +x -> world -z (car forward)
+        var mat = new THREE.MeshBasicMaterial({
+          map: trailTexture(), color: tr.color, transparent: true,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        var ribbon = new THREE.Mesh(geo, mat);
+        ribbon.position.set(0, 0.8, VEHICLES[key].len / 2 + tr.len / 2 - 0.6);
+        g.add(ribbon);
+        var ribbon2 = ribbon.clone();
+        ribbon2.rotation.z = Math.PI / 2; // crossed planes read from every angle
+        g.add(ribbon2);
+      }
       var bb = new THREE.Box3().setFromObject(g);
       TEMPLATES[key] = { group: g, h: bb.max.y };
     }
@@ -540,6 +665,55 @@
     var m = new THREE.Mesh(cargoGeo, cargoMats[cargo]);
     m.position.set(0, mount.y, mount.z);
     g.add(m);
+  }
+
+  // elevated freight line behind the left buildings — a train crosses on
+  // bandwidth spikes, length scales with the burst
+  var train = null, trainCooldownUntil = 0;
+  (function freightTrack() {
+    var railMat = new THREE.MeshLambertMaterial({ color: 0x1c2336 });
+    var rail = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.5, ROAD_LEN + 80), railMat);
+    rail.position.set(-46, 6.6, (Z0 + Z1) / 2); scene.add(rail);
+    var glow = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, ROAD_LEN + 80), neonMat);
+    glow.position.set(-44.7, 6.9, (Z0 + Z1) / 2); scene.add(glow);
+    for (var pz = Z0 - 30; pz < Z1 + 40; pz += 42) {
+      var py = new THREE.Mesh(new THREE.BoxGeometry(1.3, 6.6, 1.3), poleMat);
+      py.position.set(-46, 3.3, pz); scene.add(py);
+    }
+  })();
+  var trainWinTex = null;
+  function spawnTrain(nCars) {
+    if (train) return;
+    if (!trainWinTex) {
+      var c = document.createElement('canvas'); c.width = 64; c.height = 16;
+      var g = c.getContext('2d');
+      g.fillStyle = '#10141e'; g.fillRect(0, 0, 64, 16);
+      g.fillStyle = '#f0d8a0';
+      for (var wx = 3; wx < 62; wx += 7) g.fillRect(wx, 5, 4, 6);
+      trainWinTex = new THREE.CanvasTexture(c);
+    }
+    var grp = new THREE.Group();
+    var bodyMat = new THREE.MeshLambertMaterial({ color: 0x2a3148 });
+    var winMat = new THREE.MeshBasicMaterial({ map: trainWinTex });
+    var loco = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.8, 7), bodyMat);
+    loco.position.set(0, 1.6, -3.5); grp.add(loco);
+    var headlight = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.5, 0.15), MAT.head);
+    headlight.position.set(0, 1.4, -7.05); grp.add(headlight);
+    for (var i = 0; i < nCars; i++) {
+      var car = new THREE.Mesh(new THREE.BoxGeometry(2.3, 2.4, 8), bodyMat);
+      car.position.set(0, 1.5, 5 + i * 9);
+      grp.add(car);
+      [-1.16, 1.16].forEach(function (sx) {
+        var win = new THREE.Mesh(new THREE.PlaneGeometry(7.4, 1.0), winMat);
+        win.position.set(sx, 1.9, 5 + i * 9);
+        win.rotation.y = sx < 0 ? -Math.PI / 2 : Math.PI / 2;
+        grp.add(win);
+      });
+    }
+    var len = 8 + nCars * 9;
+    grp.position.set(-46, 6.85, Z1 + 30);
+    scene.add(grp);
+    train = { grp: grp, len: len, speed: 36 };
   }
 
   // ------------------------------------------------------------ traffic
@@ -575,11 +749,14 @@
     if (dirSign === 1) g.rotation.y = Math.PI; // face +z
     carsRoot.add(g);
 
+    var tail = null;
+    for (var tc = 0; tc < g.children.length; tc++)
+      if (g.children[tc].name === 'tail') { tail = g.children[tc]; break; }
     var car = {
       group: g, lane: lane, dir: dirSign,
       speed: def.speed * lane.f * (0.92 + Math.random() * 0.16),
       len: def.len, pkt: pkt, flashT: Math.random() * Math.PI,
-      icon: null, h: tpl.h
+      icon: null, h: tpl.h, tail: tail, brakeUntil: 0, brakeOn: false
     };
     if (pkt.icon) {
       var s = iconSprite(pkt.icon);
@@ -624,8 +801,18 @@
         var minGap = (c.len + ahead.len) * 0.5 + 1.4;
         if (gap < minGap * 2.5) v = Math.min(v, ahead.speed); // ease off when closing
         move = Math.min(v * dt, Math.max(0, gap - minGap));
+        if (move < c.speed * dt * 0.8) c.brakeUntil = now + 250; // braking
       }
       c.group.position.z += move * c.dir;
+
+      if (c.tail) { // brake lights flare while the clamp is active
+        var braking = now < c.brakeUntil;
+        if (braking !== c.brakeOn) {
+          c.brakeOn = braking;
+          c.tail.material = braking ? MAT.tailBright : MAT.tail;
+          c.tail.scale.set(braking ? 1.35 : 1, braking ? 1.35 : 1, 1);
+        }
+      }
 
       if (c.pkt.proto === 'icmp') { // police lightbar flash
         c.flashT += dt * 9;
@@ -639,6 +826,13 @@
 
       if ((c.dir === 1 && c.group.position.z > Z1 + 12) || (c.dir === -1 && c.group.position.z < Z0 - 12))
         removeCar(c);
+    }
+    if (train) {
+      train.grp.position.z -= train.speed * dt;
+      if (train.grp.position.z < Z0 - train.len - 40) {
+        scene.remove(train.grp);
+        train = null;
+      }
     }
     onRoadEl.textContent = cars.length;
     laneController();
@@ -702,6 +896,8 @@
     for (var i = 0; i < arr.length; i++) {
       spawnQueue.push(arr[i]);
       logPacket(arr[i]);
+      if (arr[i].dest) destCounts[arr[i].dest] = (destCounts[arr[i].dest] || 0) + 1;
+      if (arr[i].icon) iconBytes[arr[i].icon] = (iconBytes[arr[i].icon] || 0) + arr[i].bytes;
     }
   }
   var bwEma = 0;
@@ -723,8 +919,20 @@
     var link = s.link >= 1e9 ? (s.link / 1e9) + ' Gb/s' : s.link >= 1e6 ? Math.round(s.link / 1e6) + ' Mb/s' : '';
     linkEl.textContent = mbps.toFixed(mbps < 10 ? 1 : 0) + ' Mb/s' + (link ? ' / ' + link : '');
 
+    // scene reactions: exposure breathes with traffic, fog thickens on bad ping,
+    // street lamps shift warm -> cool as the network heats up
+    var load = Math.min(1, mbps / 50);
+    expoTarget = 1.06 + load * 0.24;
+    fogFarTarget = lastPing < 0 ? 360 : 430 - Math.min(110, Math.max(0, lastPing - 35) * 0.9);
+    bulbMat.color.copy(bulbWarm).lerp(bulbCool, load);
+
     // busy network = wider highway (hysteresis so it doesn't flap)
     bwEma = bwEma * 0.7 + mbps * 0.3;
+    // bandwidth spike: send the freight train across the skyline
+    if (!train && bwEma > 16 && performance.now() > trainCooldownUntil) {
+      spawnTrain(Math.min(10, 3 + Math.floor(bwEma / 8)));
+      trainCooldownUntil = performance.now() + 60000;
+    }
     if (!lanesManual) {
       if (targetLanes < 6 && bwEma > 30) targetLanes = 6;
       else if (targetLanes < 5 && bwEma > 10) targetLanes = 5;
@@ -757,6 +965,12 @@
     es.addEventListener('status', function (e) {
       var s = JSON.parse(e.data);
       setBadge(s.mode, s.source);
+    });
+    es.addEventListener('control', function (e) {
+      paused = !!JSON.parse(e.data).pause;
+    });
+    es.addEventListener('layout', function (e) {
+      if (window.__phApplyLayout) window.__phApplyLayout(JSON.parse(e.data));
     });
     es.onerror = function () { // EventSource retries automatically; show it
       badge.classList.remove('demo'); badge.classList.add('error');
@@ -883,6 +1097,7 @@
         '<div><span>to</span>' + esc((p.dst || '?') + (p.dport ? ':' + p.dport : '')) + '</div>' +
         '<div><span>size</span>' + fmtBytes(p.bytes) + '</div>' +
         '<div><span>cargo</span>' + esc(p.cargo || '—') + '</div>' +
+        '<div><span>dest</span>' + esc(p.dest || '—') + '</div>' +
         '<div><span>dir</span>' + (p.dir === 'in' ? 'incoming ↓' : 'outgoing ↑') + '</div>';
       inspectEl.style.display = 'block';
       clearTimeout(inspect._t);
@@ -890,11 +1105,110 @@
     }
   }
 
+  // ------------------------------------------------- movable HUD panels
+  // drag to move, [-] minimize, [x] close (restore via the bottom dock).
+  // Layout persists to localStorage AND the backend (/layout), which rebroadcasts
+  // it over SSE — so arranging panels in the browser updates the wallpaper live.
+  (function panels() {
+    var keys = ['dash', 'legend', 'log', 'servers'];
+    var layout = {}, saveT = null;
+    var dockEl = document.getElementById('dock');
+
+    function apply() {
+      keys.forEach(function (k) {
+        var el = document.getElementById(k);
+        var st = layout[k] || {};
+        if (st.x != null) {
+          el.style.left = (st.x * 100) + '%';
+          el.style.top = (st.y * 100) + '%';
+          el.style.right = 'auto'; el.style.bottom = 'auto';
+        } else {
+          el.style.left = ''; el.style.top = ''; el.style.right = ''; el.style.bottom = '';
+        }
+        el.classList.toggle('min', !!st.min);
+        el.style.display = st.hidden ? 'none' : '';
+      });
+      var hidden = keys.filter(function (k) { return layout[k] && layout[k].hidden; });
+      dockEl.style.display = hidden.length && !WALLPAPER ? 'flex' : 'none';
+      dockEl.innerHTML = hidden.map(function (k) { return '<span data-k="' + k + '">+ ' + k + '</span>'; }).join('');
+    }
+    function save() {
+      try { localStorage.setItem('ph-layout', JSON.stringify(layout)); } catch (e) { }
+      if (STATIC) return;
+      clearTimeout(saveT);
+      saveT = setTimeout(function () {
+        try { fetch('/layout', { method: 'POST', body: JSON.stringify(layout) }); } catch (e) { }
+      }, 300);
+    }
+    dockEl.addEventListener('click', function (e) {
+      var k = e.target.getAttribute('data-k');
+      if (!k) return;
+      layout[k].hidden = false; save(); apply();
+    });
+
+    keys.forEach(function (k) {
+      var el = document.getElementById(k);
+      var head = el.querySelector('h1, h2');
+      if (head) head.classList.add('ptitle');
+      var btns = document.createElement('span');
+      btns.className = 'pbtns';
+      btns.innerHTML = '<b class="pm" title="minimize">–</b><b class="px" title="close">×</b>';
+      el.appendChild(btns);
+      btns.querySelector('.pm').addEventListener('click', function (e) {
+        e.stopPropagation();
+        layout[k] = layout[k] || {};
+        layout[k].min = !layout[k].min; save(); apply();
+      });
+      btns.querySelector('.px').addEventListener('click', function (e) {
+        e.stopPropagation();
+        layout[k] = layout[k] || {};
+        layout[k].hidden = true; save(); apply();
+      });
+      if (WALLPAPER) return; // wallpaper window gets no input; layout arrives via SSE
+
+      el.addEventListener('pointerdown', function (e) {
+        if (e.target.closest('.pbtns')) return;
+        var r = el.getBoundingClientRect();
+        var ox = e.clientX - r.left, oy = e.clientY - r.top;
+        el.classList.add('dragging');
+        el.setPointerCapture(e.pointerId);
+        function mv(ev) {
+          layout[k] = layout[k] || {};
+          layout[k].x = Math.max(0, Math.min(0.97, (ev.clientX - ox) / window.innerWidth));
+          layout[k].y = Math.max(0, Math.min(0.97, (ev.clientY - oy) / window.innerHeight));
+          el.style.left = (layout[k].x * 100) + '%';
+          el.style.top = (layout[k].y * 100) + '%';
+          el.style.right = 'auto'; el.style.bottom = 'auto';
+        }
+        function up(ev) {
+          el.classList.remove('dragging');
+          el.removeEventListener('pointermove', mv);
+          el.removeEventListener('pointerup', up);
+          try { el.releasePointerCapture(ev.pointerId); } catch (e2) { }
+          save();
+        }
+        el.addEventListener('pointermove', mv);
+        el.addEventListener('pointerup', up);
+        e.stopPropagation();
+      });
+    });
+
+    try { layout = JSON.parse(localStorage.getItem('ph-layout')) || {}; } catch (e) { layout = {}; }
+    apply();
+    if (!STATIC) {
+      fetch('/layout').then(function (r) { return r.json(); }).then(function (l) {
+        if (l && typeof l === 'object' && Object.keys(l).length) { layout = l; apply(); }
+      }).catch(function () { });
+      window.__phApplyLayout = function (l) { layout = l || {}; apply(); };
+    }
+  })();
+
   // debug handle (e.g. __ph.lanes(6) from devtools; __ph.auto() resumes bandwidth control)
   var lanesManual = false;
   window.__ph = {
     lanes: function (n) { lanesManual = true; targetLanes = Math.max(LANE_MIN, Math.min(LANE_MAX, n)); },
-    auto: function () { lanesManual = false; }
+    auto: function () { lanesManual = false; },
+    train: function (n) { spawnTrain(n || 6); }
   };
 
   window.addEventListener('resize', function () {
@@ -905,18 +1219,48 @@
 
   // ------------------------------------------------------------ loop
   var last = performance.now(), acc = 0, frameMs = 1000 / FPS_CAP;
+  var paused = false;                       // set by backend "control" events
+  var expoTarget = 1.15, fogFarTarget = 430; // stat-driven scene reactions
+
+  // cinematic shot director: hold a framing, glide to the next (wallpaper only)
+  var SHOTS = [
+    { yaw: 0.62, pitch: 0.30, dist: 95, tz: -50 },
+    { yaw: 0.95, pitch: 0.17, dist: 62, tz: -25 },
+    { yaw: 0.30, pitch: 0.52, dist: 135, tz: -85 },
+    { yaw: -0.55, pitch: 0.24, dist: 75, tz: -40 }
+  ];
+  var shotIdx = 0, shotStart = 0, SHOT_HOLD = 32000, SHOT_GLIDE = 4500;
+  function easeC(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
   function loop(now) {
     requestAnimationFrame(loop);
     acc += now - last; last = now;
-    if (acc < frameMs) return;
+    if (acc < (paused ? 1000 : frameMs)) return;
     var dt = Math.min(0.15, acc / 1000); // consume all accumulated time
     acc = 0;
+    if (paused) return; // fullscreen app in front: skip all work, free the GPU
 
-    if (WALLPAPER) { // slow cinematic drift
-      camYaw = 0.62 + Math.sin(now * 0.000045) * 0.10;
-      camPitch = 0.30 + Math.sin(now * 0.00003) * 0.03;
+    if (WALLPAPER) {
+      if (!shotStart) shotStart = now;
+      var se = now - shotStart;
+      if (se > SHOT_HOLD + SHOT_GLIDE) { shotIdx = (shotIdx + 1) % SHOTS.length; shotStart = now; se = 0; }
+      var a = SHOTS[shotIdx], b = SHOTS[(shotIdx + 1) % SHOTS.length];
+      var k = se <= SHOT_HOLD ? 0 : easeC((se - SHOT_HOLD) / SHOT_GLIDE);
+      camYaw = a.yaw + (b.yaw - a.yaw) * k + Math.sin(now * 0.000045) * 0.05;
+      camPitch = a.pitch + (b.pitch - a.pitch) * k + Math.sin(now * 0.00003) * 0.02;
+      camDist = a.dist + (b.dist - a.dist) * k;
+      camTarget.z = a.tz + (b.tz - a.tz) * k;
       applyCamera();
     }
+
+    // ambient dynamics: twinkle, exposure breathing, ping-weather fog
+    if (starsMat) {
+      starsMat.opacity = 0.62 + 0.25 * Math.sin(now * 0.0005);
+      starsMat2.opacity = 0.4 + 0.2 * Math.sin(now * 0.00037 + 2);
+    }
+    renderer.toneMappingExposure += (expoTarget - renderer.toneMappingExposure) * Math.min(1, dt);
+    scene.fog.far += (fogFarTarget - scene.fog.far) * Math.min(1, dt * 0.4);
+
     step(dt, now);
     renderer.render(scene, camera);
   }

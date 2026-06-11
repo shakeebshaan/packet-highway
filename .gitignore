@@ -3,6 +3,7 @@ PacketHighway.exe
 
 # runtime state
 .wallpaper*.pid
+layout.json
 
 # local tooling
 .gstack/

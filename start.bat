@@ -1,5 +1,5 @@
 @echo off
-rem start.bat — live capture wallpaper. Self-elevates (pktmon needs admin).
+rem start.bat - live capture wallpaper. Self-elevates (pktmon needs admin).
 net session >nul 2>&1
 if errorlevel 1 (
     echo requesting administrator rights for packet capture...

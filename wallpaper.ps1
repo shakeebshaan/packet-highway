@@ -204,6 +204,17 @@ function Test-Attached([IntPtr]$hwnd) {
     return ($cls -eq 'WorkerW' -or $cls -eq 'Progman')
 }
 
+function Ensure-Backend {
+    if (-not (Get-Process PacketHighway -ErrorAction SilentlyContinue)) {
+        $exe = Join-Path $PSScriptRoot 'PacketHighway.exe'
+        if (Test-Path $exe) {
+            Start-Process -WindowStyle Hidden -FilePath $exe
+            Start-Sleep -Seconds 2
+            Write-Host ("backend restarted at " + (Get-Date -Format HH:mm:ss))
+        }
+    }
+}
+
 # find an existing window, or launch Edge and wait for one
 function Ensure-Wallpaper([bool]$quiet) {
     $hwnd = [WP]::FindPHWindow()
@@ -233,13 +244,14 @@ function Ensure-Wallpaper([bool]$quiet) {
     return $hwnd
 }
 
+Ensure-Backend
 Ensure-Wallpaper $false | Out-Null
 if ($Watch) {
     $PID | Set-Content $watchPidFile
     Write-Host "watchdog active (pid $PID) - re-pins automatically; stop.bat to end"
     while ($true) {
         Start-Sleep -Seconds 5
-        try { Ensure-Wallpaper $true | Out-Null } catch { }
+        try { Ensure-Backend; Ensure-Wallpaper $true | Out-Null } catch { }
     }
 }
 Write-Host "run stop.bat (or wallpaper.ps1 -Restore) to remove it; use -Span for all monitors"
