@@ -418,14 +418,23 @@
     laneLabels = [];
     var width = n * LANE_W + 1.2, cx = 4.8 + n * LANE_W / 2;
     [[-cx, false], [cx, true]].forEach(function (s) {
-      var m = new THREE.Mesh(new THREE.PlaneGeometry(width, ROAD_LEN),
-        new THREE.MeshLambertMaterial({ map: roadTexture(n) }));
-      m.material.color.setScalar(1 + envDayW * 0.55); // asphalt lightens a touch in daylight
+      var mat = new THREE.MeshLambertMaterial({ map: roadTexture(n) });
+      mat.color.setScalar(1 + envDayW * 0.55); // asphalt lightens a touch in daylight
+      var m = new THREE.Mesh(new THREE.PlaneGeometry(width, ROAD_LEN), mat);
       m.rotation.x = -Math.PI / 2;
       if (s[1]) m.rotation.z = Math.PI; // yellow edge faces the median on both sides
       m.position.set(s[0], 0.01, (Z0 + Z1) / 2);
       scene.add(m);
       roadMeshes.push(m);
+      // continuation slabs past both ends so the highway runs into the fog
+      [[Z0 - 180, false], [Z1 + 180, true]].forEach(function (e) {
+        var ext = new THREE.Mesh(new THREE.PlaneGeometry(width, 360), mat);
+        ext.rotation.x = -Math.PI / 2;
+        if (s[1]) ext.rotation.z = Math.PI;
+        ext.position.set(s[0], 0.008, e[0]);
+        scene.add(ext);
+        roadMeshes.push(ext);
+      });
     });
     [[-cx, '▼ IN · DOWNLOAD ▼', '#7fd8ff'],
      [cx, '▲ OUT · UPLOAD ▲', '#ffb866']].forEach(function (cfg) {
@@ -580,14 +589,30 @@
   var roofMat = new THREE.MeshBasicMaterial({ color: 0x222936 });
   var procBuildings = []; // skyline towers bound to real processes (see handleProcs)
   var bbCandidates = [];
-  for (var b = 0; b < BUILDING_COUNT; b++) {
-    var w = 14 + Math.random() * 26, h = 20 + Math.random() * 55, d = 14 + Math.random() * 26;
-    var side = Math.random() < 0.5 ? -1 : 1;
-    var bx = side * (52 + Math.random() * 150);
-    var bz = Z0 + Math.random() * (ROAD_LEN + 40) - 40;
-    if (bz > -80 && Math.abs(bx) < 95) bx = side * (95 + Math.random() * 70); // keep clear of the camera
-    if (bx > -100 && bx < -50 && bz > -175 && bz < -10) bx -= 60; // reserve the app-city district
-    if (bx > 48 && bx < 100 && bz > -155 && bz < -25) bx += 70;   // reserve the utilities district
+  // city blocks: buildings sit on a row/slot grid (3 rows per side) so they
+  // never interpenetrate — the gaps between rows read as back avenues
+  var bLots = [];
+  [-1, 1].forEach(function (side) {
+    for (var row = 0; row < 3; row++) {
+      var rx = side * (58 + row * 36);
+      var zc = Z0 - 20;
+      while (zc < Z1 + 10) {
+        var ld = 14 + Math.random() * 14;
+        var cz = zc + ld / 2;
+        zc += ld + 8 + Math.random() * 12;
+        if (side < 0 && row === 0 && cz > -175 && cz < -10) continue; // app-city district
+        if (side > 0 && row === 0 && cz > -155 && cz < -25) continue; // utilities district
+        if (row === 0 && cz > -80) continue;                          // camera clearing
+        bLots.push({ x: rx + side * Math.random() * 5, z: cz, d: ld });
+      }
+    }
+  });
+  bLots.sort(function () { return Math.random() - 0.5; });
+  bLots = bLots.slice(0, BUILDING_COUNT);
+  for (var b = 0; b < bLots.length; b++) {
+    var w = 14 + Math.random() * 14, h = 20 + Math.random() * 55, d = bLots[b].d;
+    var bx = bLots[b].x;
+    var bz = bLots[b].z;
     // tile the window texture by building size so windows stay sharp
     var tex = bTex[b % bTex.length].clone();
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -1346,6 +1371,11 @@
       scene.add(dash);
     }
   }
+  // back avenues between the building rows + cross streets = connected grid
+  [-76, 76].forEach(function (ax) { street(ax, (Z0 + Z1) / 2, 5, ROAD_LEN + 40, true); });
+  [-300, -230, -190, 40, 100, 150].forEach(function (cz2) {
+    [-1, 1].forEach(function (sid) { street(sid * 82, cz2, 4.5, 60, false); });
+  });
   street(-58, -89, 5.5, 152, true);   // app-city avenue
   for (var sd = 0; sd < 8; sd++) street(-65, -28 - sd * 17, 4, 15, false); // tower driveways
   street(-38, -89, 5, 42, false);     // interchange ramp — runs under the highway shoulder
@@ -1358,6 +1388,10 @@
   street(72, -149, 4.5, 30, false);
 
   var shuttles = [], lastShuttleAt = 0;
+  function towerFor(key) {
+    for (var ti2 = 0; ti2 < appCity.length; ti2++) if (appCity[ti2].key === key) return appCity[ti2];
+    return null;
+  }
   function spawnShuttle() {
     if (!TEMPLATES.other || !appCity.length || shuttles.length >= 6) return;
     var t = appCity[(Math.random() * appCity.length) | 0];
@@ -1745,8 +1779,29 @@
       }
       if (c.icon) c.icon.position.y = c.h + 1.9 + Math.sin(now * 0.0024 + c.flashT) * 0.12;
 
-      if ((c.dir === 1 && c.group.position.z > Z1 + 12) || (c.dir === -1 && c.group.position.z < Z0 - 12))
-        removeCar(c);
+      // inbound packets for a known app take the interchange exit and
+      // deliver to their tower instead of vanishing at the road end
+      if (!c.exitChecked && c.dir === 1 && c.group.position.z > -92) {
+        c.exitChecked = true;
+        var tw = c.pkt.icon ? towerFor(c.pkt.icon) : null;
+        if (tw && shuttles.length < 9 && Math.random() < 0.65) {
+          var tz2 = tw.grp.position.z;
+          var p0 = c.group.position.clone(); p0.y = 0;
+          removeCar(c);
+          scene.add(c.group);
+          shuttles.push({
+            g: c.group, seg: 0, d: 0, speed: 11,
+            pts: [p0,
+              new THREE.Vector3(-40, 0, -89),
+              new THREE.Vector3(-58, 0, -89),
+              new THREE.Vector3(-58, 0, tz2),
+              new THREE.Vector3(-67, 0, tz2)]
+          });
+          continue;
+        }
+      }
+      if ((c.dir === 1 && c.group.position.z > Z1 + 60) || (c.dir === -1 && c.group.position.z < Z0 - 60))
+        removeCar(c); // far onto the continuation slab, deep in the fog
     }
     if (train) {
       train.grp.position.z -= train.speed * dt;
