@@ -20,8 +20,9 @@ synthetic traffic, nothing is captured. Drag to orbit, scroll to zoom, click a
 car to inspect the packet.
 
 > Idea sparked by [this tweet by @BijanBowen](https://x.com/bijanbowen/status/2064473191163035814)
-> ("Had Claude log network packets and display them as cars on a highway").
-> This is an independent open-source implementation, built with Claude.
+> ("Had Claude Fable 5 log network packets and display them as cars on a
+> highway"). This is an independent open-source implementation, built with
+> Anthropic's Claude Fable 5.
 
 ## Quick start (Windows 10/11)
 
@@ -61,8 +62,12 @@ log and the click-to-inspect card.
 
 - **Metadata only.** Protocol, ports, addresses, sizes, owning process. Packet
   payloads are never inspected, stored, or displayed.
-- **Local only.** The server binds to `127.0.0.1`. No telemetry, no analytics,
-  zero outbound connections.
+- **Local only.** The server binds to `127.0.0.1`. No telemetry, no analytics.
+  Nothing about your traffic ever leaves the machine.
+- **One exception, disclosed:** the sky matches your real weather. On startup
+  the backend asks `ip-api.com` for a coarse lat/lon (standard web request —
+  your IP is all it sees) and `open-meteo.com` for current precipitation.
+  That's the only outbound traffic, and no capture data is ever included.
 - **The hosted demo captures nothing.** It synthesizes fake traffic
   client-side in your browser.
 - **Auditable.** The whole backend is one dependency-free C# file you can read

@@ -39,6 +39,7 @@ namespace PacketHighway
         public string Icon;    // icon cache key or null
         public string Cargo;   // media audio data text lookup control (heuristic) or null
         public string Dest;    // destination company name (prefix/rDNS heuristic) or null
+        public bool Wire;      // long-lived socket (websocket-ish) -> power line pulse
         public long T;         // unix ms
     }
 
@@ -65,7 +66,8 @@ namespace PacketHighway
                  + ",\"src\":" + Str(p.Src) + ",\"dst\":" + Str(p.Dst)
                  + ",\"sport\":" + p.SPort + ",\"dport\":" + p.DPort
                  + ",\"app\":" + Str(p.App) + ",\"icon\":" + Str(p.Icon)
-                 + ",\"cargo\":" + Str(p.Cargo) + ",\"dest\":" + Str(p.Dest) + ",\"t\":" + p.T + "}";
+                 + ",\"cargo\":" + Str(p.Cargo) + ",\"dest\":" + Str(p.Dest)
+                 + ",\"wire\":" + (p.Wire ? "true" : "false") + ",\"t\":" + p.T + "}";
         }
     }
 
@@ -90,8 +92,12 @@ namespace PacketHighway
         static volatile Dictionary<int, int> _tcp = new Dictionary<int, int>();
         static volatile Dictionary<int, int> _udp = new Dictionary<int, int>();
 
-        public class Conn { public string RemoteIp; public int RemotePort; public int LocalPort; public int Pid; }
+        public class Conn { public string RemoteIp; public int RemotePort; public int LocalPort; public int Pid; public int AgeSec; }
         public static volatile List<Conn> Conns = new List<Conn>();
+        static readonly Dictionary<string, DateTime> _connSeen = new Dictionary<string, DateTime>();
+        static volatile HashSet<int> _wirePorts = new HashSet<int>(); // local ports of long-lived conns
+
+        public static bool IsLongLived(int localPort) { return _wirePorts.Contains(localPort); }
 
         public static void Start()
         {
@@ -122,7 +128,24 @@ namespace PacketHighway
             ReadTable(false, AF_INET, 12, 4, 8, udp, null, 0, 0);
             // UDP v6: addr16 scope4 port4 pid4 => port@20 pid@24
             ReadTable(false, AF_INET6, 28, 20, 24, udp, null, 0, 0);
-            _tcp = tcp; _udp = udp; Conns = conns;
+            // connection age: long-lived sockets (websockets, push channels) become "wires"
+            var nowT = DateTime.UtcNow;
+            var alive = new HashSet<string>();
+            var wires = new HashSet<int>();
+            foreach (var cn in conns)
+            {
+                string k = cn.RemoteIp + ":" + cn.RemotePort + ":" + cn.LocalPort;
+                alive.Add(k);
+                DateTime first;
+                if (!_connSeen.TryGetValue(k, out first)) { _connSeen[k] = nowT; first = nowT; }
+                cn.AgeSec = (int)(nowT - first).TotalSeconds;
+                if (cn.AgeSec > 30) wires.Add(cn.LocalPort);
+            }
+            var dead = new List<string>();
+            foreach (var k in _connSeen.Keys) if (!alive.Contains(k)) dead.Add(k);
+            foreach (var k in dead) _connSeen.Remove(k);
+
+            _tcp = tcp; _udp = udp; Conns = conns; _wirePorts = wires;
         }
 
         static int Ntohs(int raw) { return ((raw & 0xFF) << 8) | ((raw >> 8) & 0xFF); }
@@ -735,12 +758,67 @@ namespace PacketHighway
                 if (pid == 0) pid = tcpish ? PortMap.PidForUdp(localPort) : PortMap.PidForTcp(localPort);
                 string name, icon; PortMap.Resolve(pid, out name, out icon);
                 pkt.App = name; pkt.Icon = icon;
+                if (tcpish) pkt.Wire = PortMap.IsLongLived(localPort);
             }
 
             Pipe.Push(pkt);
         }
 
         static int SafePort(string s) { int p; return int.TryParse(s, out p) && p <= 65535 ? p : 0; }
+    }
+
+    // ------------------------------------------------------- local weather
+    // free + keyless: ip-api.com for coarse location, open-meteo for weather.
+    // refreshed every 15 min; clients get the last value on connect.
+
+    static class Weather
+    {
+        public static volatile string LastEnv = null;
+
+        static double Num(string s, string key, double fallback)
+        {
+            int i = s.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return fallback;
+            i += key.Length;
+            int e = i;
+            while (e < s.Length && (char.IsDigit(s[e]) || s[e] == '.' || s[e] == '-')) e++;
+            double v;
+            return double.TryParse(s.Substring(i, e - i), System.Globalization.NumberStyles.Float,
+                CultureInfo.InvariantCulture, out v) ? v : fallback;
+        }
+
+        public static void Start()
+        {
+            var t = new Thread(() =>
+            {
+                System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
+                while (true)
+                {
+                    try
+                    {
+                        using (var wc = new System.Net.WebClient())
+                        {
+                            string geo = wc.DownloadString("http://ip-api.com/json/?fields=lat,lon");
+                            double lat = Num(geo, "\"lat\":", 0), lon = Num(geo, "\"lon\":", 0);
+                            string wx = wc.DownloadString(
+                                "https://api.open-meteo.com/v1/forecast?latitude=" + lat.ToString(CultureInfo.InvariantCulture) +
+                                "&longitude=" + lon.ToString(CultureInfo.InvariantCulture) +
+                                "&current=precipitation,weather_code,is_day");
+                            double prec = Num(wx, "\"precipitation\":", 0);
+                            double code = Num(wx, "\"weather_code\":", 0);
+                            double isday = Num(wx, "\"is_day\":", 0);
+                            LastEnv = "{\"precip\":" + prec.ToString(CultureInfo.InvariantCulture) +
+                                      ",\"code\":" + (int)code + ",\"isDay\":" + (int)isday + "}";
+                            Hub.Broadcast("env", LastEnv);
+                            Console.WriteLine("[weather] " + LastEnv);
+                        }
+                    }
+                    catch (Exception ex) { Console.WriteLine("[weather] failed: " + ex.Message); }
+                    Thread.Sleep(15 * 60 * 1000);
+                }
+            });
+            t.IsBackground = true; t.Start();
+        }
     }
 
     // ------------------------------------------------------- lite-live mode
@@ -817,6 +895,7 @@ namespace PacketHighway
                     p.DPort = inDir ? cn.LocalPort : cn.RemotePort;
                     int svc = cn.RemotePort; // classify on the well-known side
                     p.Proto = svc == 443 ? "https" : svc == 80 ? "http" : svc == 53 ? "dns" : svc == 22 ? "ssh" : "tcp";
+                    p.Wire = cn.AgeSec > 30; // long-lived socket -> power line pulse
                     string name, icon; PortMap.Resolve(cn.Pid, out name, out icon);
                     p.App = name; p.Icon = icon;
                 }
@@ -860,6 +939,7 @@ namespace PacketHighway
                             Src = outb ? "192.168.1.23" : ips[rnd.Next(ips.Length)], Dst = outb ? ips[rnd.Next(ips.Length)] : "192.168.1.23",
                             SPort = 40000 + rnd.Next(20000), DPort = ProtoPort(proto, rnd),
                             App = app == null ? null : app.Name, Icon = app == null ? null : app.Icon,
+                            Wire = rnd.Next(7) == 0,
                             T = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                         });
                     }
@@ -960,6 +1040,11 @@ namespace PacketHighway
                     s.Write(head, 0, head.Length);
                     var hello = Encoding.UTF8.GetBytes("event: status\ndata: {\"mode\":" + Json.Str(Stats.Mode) + ",\"source\":" + Json.Str(Stats.Source) + "}\n\n");
                     s.Write(hello, 0, hello.Length); s.Flush();
+                    if (Weather.LastEnv != null)
+                    {
+                        var env = Encoding.UTF8.GetBytes("event: env\ndata: " + Weather.LastEnv + "\n\n");
+                        s.Write(env, 0, env.Length); s.Flush();
+                    }
                     Hub.Add(s);
                     return; // keep socket open; hub owns it now
                 }
@@ -1058,6 +1143,7 @@ namespace PacketHighway
             Stats.Start();
             Pipe.Start();
             NetInfo.Start();
+            Weather.Start();
             Server.Start(port, webDir);
 
             if (demo) Demo.Start();

@@ -16,7 +16,8 @@
 
   var MAX_CARS = ECO ? 50 : (WALLPAPER ? 110 : 200);
   var FPS_CAP = ECO ? 24 : (WALLPAPER ? 30 : 60);
-  var PIXEL_RATIO = (ECO || WALLPAPER) ? 1 : Math.min(window.devicePixelRatio || 1, 2);
+  // native-resolution rendering ("4K quality"); eco mode stays cheap
+  var PIXEL_RATIO = ECO ? 1 : Math.min(window.devicePixelRatio || 1, 2);
   var BUILDING_COUNT = ECO ? 16 : 36;
 
   // protocol -> vehicle definition (colors match the legend)
@@ -36,7 +37,7 @@
 
   // ------------------------------------------------------------ renderer
   var canvas = document.getElementById('scene');
-  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: !ECO && !WALLPAPER, powerPreference: ECO ? 'low-power' : 'default' });
+  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: !ECO, powerPreference: ECO ? 'low-power' : 'default' });
   renderer.setPixelRatio(PIXEL_RATIO);
   renderer.setSize(window.innerWidth, window.innerHeight);
   // filmic grade — the whole retro-future look keys off this
@@ -59,25 +60,33 @@
   }
   applyCamera();
 
-  scene.add(new THREE.HemisphereLight(0x3a4a78, 0x1a1238, 1.1)); // indigo sky, violet bounce
+  var hemi = new THREE.HemisphereLight(0x3a4a78, 0x1a1238, 1.25); // indigo sky, violet bounce
+  scene.add(hemi);
   var dl = new THREE.DirectionalLight(0x9db8e8, 0.7);
   dl.position.set(-130, 90, -260);
   scene.add(dl);
 
   // --------------------------------------------------- sky (retro-future)
-  var starsMat, starsMat2, sunY = 70;
-  (function sky() {
-    // vertex-colored dome: indigo zenith -> violet horizon with an ember band
-    var geo = new THREE.SphereGeometry(900, 16, 12);
-    var pos = geo.attributes.position, cols = [];
-    var top = new THREE.Color(0x05060f), mid = new THREE.Color(0x1a1238), hor = new THREE.Color(0x3a2450);
+  var starsMat, starsMat2;
+  var domeGeo, sunSprite, sunHalo;
+  var nightGlow = []; // glow elements hidden in daylight
+  var starsScale = 1, envExpo = 1, envRain = 0, envSnow = false, rainFallSpeed = 45;
+  function setDomeColors(topHex, midHex, horHex) {
+    var pos = domeGeo.attributes.position, col = domeGeo.attributes.color;
+    var top = new THREE.Color(topHex), mid = new THREE.Color(midHex), hor = new THREE.Color(horHex);
     for (var i = 0; i < pos.count; i++) {
       var t = Math.max(0, Math.min(1, pos.getY(i) / 900));
       var c2 = t < 0.18 ? hor.clone().lerp(mid, t / 0.18) : mid.clone().lerp(top, (t - 0.18) / 0.82);
-      cols.push(c2.r, c2.g, c2.b);
+      col.setXYZ(i, c2.r, c2.g, c2.b);
     }
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
-    scene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false })));
+    col.needsUpdate = true;
+  }
+  (function sky() {
+    // vertex-colored dome: recolored live by time-of-day (see applyEnvironment)
+    domeGeo = new THREE.SphereGeometry(900, 16, 12);
+    domeGeo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(domeGeo.attributes.position.count * 3), 3));
+    scene.add(new THREE.Mesh(domeGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false })));
+    setDomeColors(0x05060f, 0x1a1238, 0x3a2450);
 
     // two star layers, twinkled in the loop by whole-material opacity
     function starLayer(count, size, opacity) {
@@ -108,17 +117,17 @@
       g3.fillRect(0, sy, 256, 3 + st * 1.7);
     }
     var sunTex = new THREE.CanvasTexture(c);
-    var sun = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, transparent: true, fog: false, depthWrite: false }));
-    sun.scale.set(230, 230, 1);
-    sun.position.set(-40, sunY, -800);
-    scene.add(sun);
-    var halo = new THREE.Sprite(new THREE.SpriteMaterial({
+    sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, transparent: true, fog: false, depthWrite: false }));
+    sunSprite.scale.set(230, 230, 1);
+    sunSprite.position.set(-40, 70, -800);
+    scene.add(sunSprite);
+    sunHalo = new THREE.Sprite(new THREE.SpriteMaterial({
       map: radialTex('rgba(255,94,138,0.5)'), transparent: true, fog: false,
       blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.7
     }));
-    halo.scale.set(420, 420, 1);
-    halo.position.copy(sun.position);
-    scene.add(halo);
+    sunHalo.scale.set(420, 420, 1);
+    sunHalo.position.copy(sunSprite.position);
+    scene.add(sunHalo);
   })();
 
   // shared helper: radial gradient texture (glow sprites, light pools)
@@ -239,6 +248,7 @@
   [-1.52, 1.52].forEach(function (nx) {
     var strip = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.1, ROAD_LEN), neonMat);
     strip.position.set(nx, 0.72, (Z0 + Z1) / 2); scene.add(strip);
+    nightGlow.push(strip);
   });
 
   // street lights along the median + static glow package (pools, halos, wet streaks)
@@ -276,6 +286,7 @@
     });
     pools.renderOrder = 2; streaks.renderOrder = 2;
     scene.add(pools); scene.add(streaks);
+    nightGlow.push(pools, streaks);
 
     // bulb halo sprites
     var haloMat = new THREE.SpriteMaterial({
@@ -286,6 +297,7 @@
       var s = new THREE.Sprite(haloMat);
       s.scale.set(5, 3.4, 1); s.position.set(0, 9, z);
       scene.add(s);
+      nightGlow.push(s);
     });
   })();
 
@@ -313,6 +325,7 @@
     var bx = side * (52 + Math.random() * 110);
     var bz = Z0 + Math.random() * (ROAD_LEN + 40) - 40;
     if (bz > -80 && Math.abs(bx) < 95) bx = side * (95 + Math.random() * 70); // keep clear of the camera
+    if (bx > -100 && bx < -50 && bz > -175 && bz < -10) bx -= 60; // reserve the app-city district
     // tile the window texture by building size so windows stay sharp
     var tex = bTex[b % bTex.length].clone();
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -331,8 +344,9 @@
   var iconBytes = {}, bbImgCache = {};
   var billboards = [];
   bbCandidates.sort(function (a, b2) { return b2.h - a.h; }).slice(0, ECO ? 0 : 3).forEach(function (cd) {
-    var c = document.createElement('canvas'); c.width = 256; c.height = 256;
+    var c = document.createElement('canvas'); c.width = 512; c.height = 512; // 2x for crisp text
     var tex = new THREE.CanvasTexture(c);
+    c.getContext('2d').scale(2, 2);
     var size = Math.min(cd.w * 0.8, 13);
     var m = new THREE.Mesh(new THREE.PlaneGeometry(size, size),
       new THREE.MeshBasicMaterial({ map: tex }));
@@ -423,8 +437,9 @@
     signTex.needsUpdate = true;
   }
   (function sign() {
-    var c = document.createElement('canvas'); c.width = 512; c.height = 128;
+    var c = document.createElement('canvas'); c.width = 1024; c.height = 256; // 2x for crisp text at 4K
     signCtx = c.getContext('2d');
+    signCtx.scale(2, 2);
     signTex = new THREE.CanvasTexture(c);
     redrawSign();
     var board = new THREE.Mesh(new THREE.PlaneGeometry(26, 6.5),
@@ -442,8 +457,9 @@
   var gantries = [];
   (function exitGantries() {
     [[-95, 'EXIT 12'], [-175, 'EXIT 25']].forEach(function (cfg) {
-      var c = document.createElement('canvas'); c.width = 512; c.height = 96;
+      var c = document.createElement('canvas'); c.width = 1024; c.height = 192; // 2x for crisp text
       var ctx = c.getContext('2d');
+      ctx.scale(2, 2);
       var tex = new THREE.CanvasTexture(c);
       var board = new THREE.Mesh(new THREE.PlaneGeometry(20, 3.8),
         new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
@@ -486,7 +502,7 @@
   var matCache = {};
   function lambert(color) {
     // self-emissive accent keeps protocol colors saturated under the ACES grade
-    if (!matCache[color]) matCache[color] = new THREE.MeshLambertMaterial({ color: color, emissive: color, emissiveIntensity: 0.22 });
+    if (!matCache[color]) matCache[color] = new THREE.MeshLambertMaterial({ color: color, emissive: color, emissiveIntensity: 0.32 });
     return matCache[color];
   }
   var MAT = {
@@ -495,7 +511,7 @@
     tail: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
     tailBright: new THREE.MeshBasicMaterial({ color: 0xff5040 }),
     tire: new THREE.MeshLambertMaterial({ color: 0x090a0e }),
-    dark: new THREE.MeshLambertMaterial({ color: 0x10141e }),
+    dark: new THREE.MeshLambertMaterial({ color: 0x10141e, emissive: 0x141b2c, emissiveIntensity: 0.55 }),
     red: new THREE.MeshBasicMaterial({ color: 0xff2a3c }),
     blue: new THREE.MeshBasicMaterial({ color: 0x2a7cff })
   };
@@ -622,23 +638,57 @@
       var g = FACTORY[key]();
       var tr = TRAIL[key];
       if (tr) {
-        var geo = new THREE.PlaneGeometry(tr.len, 1.0);
+        // slim light streak, not geometry: low height + soft opacity
+        var geo = new THREE.PlaneGeometry(tr.len, 0.55);
         geo.rotateY(Math.PI / 2); // plane local +x -> world -z (car forward)
         var mat = new THREE.MeshBasicMaterial({
-          map: trailTexture(), color: tr.color, transparent: true,
+          map: trailTexture(), color: tr.color, transparent: true, opacity: 0.7,
           blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
         });
         var ribbon = new THREE.Mesh(geo, mat);
-        ribbon.position.set(0, 0.8, VEHICLES[key].len / 2 + tr.len / 2 - 0.6);
+        ribbon.position.set(0, 0.75, VEHICLES[key].len / 2 + tr.len / 2 - 0.6);
         g.add(ribbon);
-        var ribbon2 = ribbon.clone();
-        ribbon2.rotation.z = Math.PI / 2; // crossed planes read from every angle
-        g.add(ribbon2);
+      }
+      // headlight beam on the road ahead + hazard blinkers (4-wheelers only)
+      if (key !== 'dns' && key !== 'arp') {
+        if (!ECO) {
+          var beam = new THREE.Mesh(beamGeometry(), beamMaterial());
+          beam.position.set(0, 0.05, -(VEHICLES[key].len / 2 + 4.6));
+          beam.renderOrder = 1;
+          g.add(beam);
+        }
+        if (!MAT.amber) MAT.amber = new THREE.MeshBasicMaterial({ color: 0xffb340 });
+        [-0.95, 0.95].forEach(function (hx) {
+          var hz = box(g, 0.3, 0.22, 0.1, MAT.amber, hx, 0.9, VEHICLES[key].len / 2 + 0.02);
+          hz.name = 'hz';
+          hz.visible = false;
+        });
       }
       var bb = new THREE.Box3().setFromObject(g);
       TEMPLATES[key] = { group: g, h: bb.max.y };
     }
     return TEMPLATES[key];
+  }
+
+  // shared headlight beam (one geometry + one material for every car)
+  var _beamGeo = null, _beamMat = null;
+  function beamGeometry() {
+    if (!_beamGeo) { _beamGeo = new THREE.PlaneGeometry(4.6, 9.5); _beamGeo.rotateX(-Math.PI / 2); }
+    return _beamGeo;
+  }
+  function beamMaterial() {
+    if (!_beamMat) {
+      var c = document.createElement('canvas'); c.width = 32; c.height = 64;
+      var g = c.getContext('2d');
+      var grad = g.createLinearGradient(0, 64, 0, 0);
+      grad.addColorStop(0, 'rgba(255,242,196,0.32)'); grad.addColorStop(1, 'rgba(255,242,196,0)');
+      g.fillStyle = grad; g.fillRect(0, 0, 32, 64);
+      _beamMat = new THREE.MeshBasicMaterial({
+        map: new THREE.CanvasTexture(c), transparent: true,
+        blending: THREE.AdditiveBlending, depthWrite: false
+      });
+    }
+    return _beamMat;
   }
 
   // app icon sprite cache
@@ -676,6 +726,7 @@
     rail.position.set(-46, 6.6, (Z0 + Z1) / 2); scene.add(rail);
     var glow = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, ROAD_LEN + 80), neonMat);
     glow.position.set(-44.7, 6.9, (Z0 + Z1) / 2); scene.add(glow);
+    nightGlow.push(glow);
     for (var pz = Z0 - 30; pz < Z1 + 40; pz += 42) {
       var py = new THREE.Mesh(new THREE.BoxGeometry(1.3, 6.6, 1.3), poleMat);
       py.position.set(-46, 3.3, pz); scene.add(py);
@@ -716,6 +767,152 @@
     train = { grp: grp, len: len, speed: 36 };
   }
 
+  // power lines along both roadsides: long-lived sockets (websockets, push
+  // channels) travel as electric pulses on the wires
+  var wirePulses = [], WIRE_Y = 12.0, WIRE_XS = [-25.8, 25.8];
+  (function powerLines() {
+    var wireMat = new THREE.MeshLambertMaterial({ color: 0x1a2230 });
+    WIRE_XS.forEach(function (wx) {
+      for (var pz = Z0; pz < Z1 + 30; pz += 60) {
+        var pole = new THREE.Mesh(new THREE.BoxGeometry(0.3, WIRE_Y, 0.3), poleMat);
+        pole.position.set(wx, WIRE_Y / 2, pz); scene.add(pole);
+        var arm = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.18, 0.18), poleMat);
+        arm.position.set(wx, WIRE_Y - 0.4, pz); scene.add(arm);
+      }
+      [-0.95, 0.95].forEach(function (ox) {
+        var wire = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, ROAD_LEN + 60), wireMat);
+        wire.position.set(wx + ox, WIRE_Y - 0.55, (Z0 + Z1) / 2); scene.add(wire);
+      });
+    });
+  })();
+  // kept deliberately subtle: at most one faint pulse every ~2s per direction,
+  // representing "a long-lived socket is streaming" rather than per-packet noise
+  var pulseMat = null, _lastPulse = { 'in': 0, out: 0 };
+  function spawnPulse(dirIn) {
+    var key = dirIn ? 'in' : 'out';
+    var nowMs = performance.now();
+    if (wirePulses.length >= 4 || nowMs - _lastPulse[key] < 2000) return;
+    _lastPulse[key] = nowMs;
+    if (!pulseMat) pulseMat = new THREE.SpriteMaterial({
+      map: radialTex('rgba(140,235,255,0.55)'), transparent: true, opacity: 0.55,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    var s = new THREE.Sprite(pulseMat);
+    s.scale.set(1.8, 1.0, 1);
+    var x = (dirIn ? WIRE_XS[0] : WIRE_XS[1]) + (Math.random() < 0.5 ? -0.95 : 0.95);
+    s.position.set(x, WIRE_Y - 0.55, dirIn ? Z0 : Z1);
+    scene.add(s);
+    wirePulses.push({ s: s, dir: dirIn ? 1 : -1 });
+  }
+
+  // app city: active applications rise as towers behind the freight line —
+  // more traffic, taller tower (uses the decaying iconBytes accumulator)
+  var appCity = [], APPCITY_X = -72;
+  function appTower(key) {
+    var c = document.createElement('canvas'); c.width = 256; c.height = 320; // 2x for crisp text
+    var ctx = c.getContext('2d');
+    ctx.scale(2, 2);
+    var tex = new THREE.CanvasTexture(c);
+    var body = bTex[appCity.length % bTex.length].clone();
+    body.wrapS = body.wrapT = THREE.RepeatWrapping;
+    body.needsUpdate = true;
+    var mesh = new THREE.Mesh(new THREE.BoxGeometry(11, 1, 11),
+      new THREE.MeshBasicMaterial({ map: body }));
+    var plate = new THREE.Mesh(new THREE.PlaneGeometry(7.5, 9.4),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+    plate.rotation.y = Math.PI / 2; // face the highway
+    var grp = new THREE.Group();
+    grp.add(mesh); grp.add(plate);
+    grp.position.set(APPCITY_X, 0, -28 - appCity.length * 17);
+    scene.add(grp);
+    var t = { key: key, mesh: mesh, body: body, plate: plate, ctx: ctx, tex: tex, cur: 6, target: 10 };
+    appCity.push(t);
+    return t;
+  }
+  function redrawTowerPlate(t) {
+    var g = t.ctx;
+    g.clearRect(0, 0, 128, 160);
+    g.fillStyle = 'rgba(7,13,24,0.92)'; g.fillRect(0, 0, 128, 160);
+    g.strokeStyle = '#57b8e8'; g.lineWidth = 4; g.strokeRect(3, 3, 122, 154);
+    var img = bbImgCache[t.key];
+    if (!img) { img = bbImgCache[t.key] = new Image(); img.src = '/icon/' + t.key + '.png'; img.onload = function () { redrawTowerPlate(t); }; }
+    if (img.complete && img.naturalWidth) g.drawImage(img, 32, 18, 64, 64);
+    g.font = 'bold 17px Consolas, monospace'; g.textAlign = 'center'; g.fillStyle = '#c8d6e5';
+    var label = t.key.length > 12 ? t.key.slice(0, 11) + '…' : t.key;
+    g.fillText(label, 64, 116);
+    g.fillStyle = '#4fd2ff'; g.font = '14px Consolas, monospace';
+    g.fillText(fmtBytes(iconBytes[t.key] || 0), 64, 140);
+    t.tex.needsUpdate = true;
+  }
+  function updateAppCity() {
+    var keys = Object.keys(iconBytes).sort(function (a, b) { return iconBytes[b] - iconBytes[a]; }).slice(0, 8);
+    var max = keys.length ? iconBytes[keys[0]] : 1;
+    keys.forEach(function (k) {
+      var t = null;
+      for (var i = 0; i < appCity.length; i++) if (appCity[i].key === k) { t = appCity[i]; break; }
+      if (!t && appCity.length < 8) t = appTower(k);
+      else if (!t) { // reuse the shortest tower for the newcomer
+        t = appCity.reduce(function (a, b) { return a.cur < b.cur ? a : b; });
+        t.key = k;
+      }
+      t.target = 10 + 52 * (iconBytes[k] / max);
+      redrawTowerPlate(t);
+    });
+    appCity.forEach(function (t) { if (keys.indexOf(t.key) < 0) t.target = 6; });
+  }
+  setInterval(updateAppCity, 3000);
+
+  // surveillance drones hover over the city — one per ~8 connected servers
+  var drones = [];
+  function makeDrone() {
+    var g = new THREE.Group();
+    box(g, 0.9, 0.25, 0.9, MAT.dark, 0, 0, 0);
+    [[-0.55, -0.55], [0.55, -0.55], [-0.55, 0.55], [0.55, 0.55]].forEach(function (o) {
+      box(g, 0.5, 0.06, 0.5, MAT.tire, o[0], 0.16, o[1]);
+    });
+    var led = box(g, 0.16, 0.16, 0.16, MAT.red, 0, -0.18, 0);
+    g.position.set(-25 + Math.random() * 50, 22 + Math.random() * 12, -130 + Math.random() * 150);
+    scene.add(g);
+    return { g: g, t: Math.random() * 100, cx: g.position.x, cy: g.position.y, cz: g.position.z, led: led };
+  }
+  function setDroneCount(n) {
+    while (drones.length < n) drones.push(makeDrone());
+    while (drones.length > n) { var d = drones.pop(); scene.remove(d.g); }
+  }
+
+  // airplane: a big download is a landing approach over the highway,
+  // a big upload is a takeoff (triggered from sustained bandwidth in handleStats)
+  var plane = null, planeCooldownUntil = 0;
+  function spawnPlane(landing) {
+    if (plane) return;
+    var g = new THREE.Group();
+    var body = new THREE.MeshLambertMaterial({ color: 0xd8e0ec, emissive: 0x8090b0, emissiveIntensity: 0.3 });
+    box(g, 1.7, 1.7, 13, body, 0, 0, 0);                 // fuselage
+    box(g, 15, 0.28, 2.8, body, 0, 0.1, 0.5);            // wings
+    box(g, 5.5, 0.24, 1.7, body, 0, 1.3, 5.6);           // tail wing
+    box(g, 0.24, 2.0, 1.7, body, 0, 1.4, 5.6);           // fin
+    box(g, 1.2, 0.55, 0.3, MAT.head, 0, -0.25, -6.55);   // nose light
+    var wl = box(g, 0.32, 0.32, 0.32, MAT.red, -7.5, 0.1, 0.5);
+    var wr = box(g, 0.32, 0.32, 0.32, new THREE.MeshBasicMaterial({ color: 0x35ff70 }), 7.5, 0.1, 0.5);
+    scene.add(g);
+    plane = { g: g, t: 0, landing: landing, wl: wl, wr: wr, dur: 16 };
+  }
+  function stepPlane(dt, now) {
+    if (!plane) return;
+    plane.t += dt;
+    var p = Math.min(1, plane.t / plane.dur);
+    if (plane.landing) { // glide in over the highway toward the camera
+      plane.g.position.set(-6, 13 + 92 * Math.pow(1 - p, 1.7), -480 + 600 * p);
+      plane.g.rotation.set(0.10 * (1 - p), Math.PI, 0); // nose-up flare, flying +z
+    } else {            // takeoff: away from the camera, climbing out
+      plane.g.position.set(6, 13 + 92 * Math.pow(p, 1.7), 120 - 600 * p);
+      plane.g.rotation.set(-0.12 * p, 0, 0);
+    }
+    var strobe = Math.sin(now * 0.02) > 0.6; // wing strobes
+    plane.wl.visible = strobe; plane.wr.visible = !strobe;
+    if (p >= 1) { scene.remove(plane.g); plane = null; }
+  }
+
   // ------------------------------------------------------------ traffic
   var cars = [];           // active vehicles
   var spawnQueue = [];     // packets waiting for lane space
@@ -745,22 +942,29 @@
     var tpl = getTemplate(pkt.proto);
     var g = tpl.group.clone();
     addCargo(g, pkt.proto, pkt.cargo);
+    // packet size -> vehicle size (uniform, so nothing deforms)
+    var sz = 0.8 + Math.min(1, (pkt.bytes || 60) / 1500) * 0.5;
+    g.scale.setScalar(sz);
     g.position.set(lane.x, 0, startZ);
     if (dirSign === 1) g.rotation.y = Math.PI; // face +z
     carsRoot.add(g);
 
-    var tail = null;
-    for (var tc = 0; tc < g.children.length; tc++)
-      if (g.children[tc].name === 'tail') { tail = g.children[tc]; break; }
+    var tail = null, hz = [];
+    for (var tc = 0; tc < g.children.length; tc++) {
+      if (g.children[tc].name === 'tail') tail = g.children[tc];
+      else if (g.children[tc].name === 'hz') hz.push(g.children[tc]);
+    }
     var car = {
       group: g, lane: lane, dir: dirSign,
       speed: def.speed * lane.f * (0.92 + Math.random() * 0.16),
-      len: def.len, pkt: pkt, flashT: Math.random() * Math.PI,
-      icon: null, h: tpl.h, tail: tail, brakeUntil: 0, brakeOn: false
+      len: def.len * sz, pkt: pkt, flashT: Math.random() * Math.PI,
+      icon: null, h: tpl.h, tail: tail, hz: hz,
+      brakeUntil: 0, brakeOn: false, stuckSince: 0
     };
     if (pkt.icon) {
       var s = iconSprite(pkt.icon);
       s.position.set(0, car.h + 1.7, 0);
+      s.scale.setScalar(1.9 / sz); // keep icon size constant in world space
       g.add(s);
       car.icon = s;
     }
@@ -811,6 +1015,14 @@
           c.brakeOn = braking;
           c.tail.material = braking ? MAT.tailBright : MAT.tail;
           c.tail.scale.set(braking ? 1.35 : 1, braking ? 1.35 : 1, 1);
+          if (!braking) { c.stuckSince = 0; c.hz.forEach(function (h2) { h2.visible = false; }); }
+        }
+        if (braking) { // stuck in traffic >1.2s: hazard blinkers
+          if (!c.stuckSince) c.stuckSince = now;
+          if (c.hz.length && now - c.stuckSince > 1200) {
+            var on2 = Math.sin(now * 0.012) > 0;
+            c.hz.forEach(function (h2) { h2.visible = on2; });
+          }
         }
       }
 
@@ -834,6 +1046,40 @@
         train = null;
       }
     }
+
+    stepPlane(dt, now);
+    for (var dr = 0; dr < drones.length; dr++) {
+      var dd = drones[dr];
+      dd.t += dt;
+      dd.g.position.set(
+        dd.cx + Math.sin(dd.t * 0.4) * 9,
+        dd.cy + Math.sin(dd.t * 1.3) * 1.2,
+        dd.cz + Math.cos(dd.t * 0.31) * 11);
+      dd.led.visible = Math.sin(dd.t * 7) > 0;
+    }
+
+    // electric pulses racing along the power lines
+    for (var wp = wirePulses.length - 1; wp >= 0; wp--) {
+      var pu = wirePulses[wp];
+      pu.s.position.z += 110 * pu.dir * dt;
+      if (pu.s.position.z > Z1 + 10 || pu.s.position.z < Z0 - 10) {
+        scene.remove(pu.s);
+        wirePulses.splice(wp, 1);
+      }
+    }
+
+    // app towers grow/shrink toward their traffic share
+    for (var at = 0; at < appCity.length; at++) {
+      var t = appCity[at];
+      if (Math.abs(t.cur - t.target) > 0.05) {
+        t.cur += (t.target - t.cur) * Math.min(1, dt * 1.6);
+        t.mesh.scale.y = t.cur;
+        t.mesh.position.y = t.cur / 2;
+        t.body.repeat.set(1, Math.max(1, Math.round(t.cur / 26)));
+        t.plate.position.y = t.cur + 6;
+      }
+    }
+
     onRoadEl.textContent = cars.length;
     laneController();
   }
@@ -864,6 +1110,14 @@
         '<span class="veh">' + d.veh + '</span><span class="proto">' + d.proto + '</span>';
       lg.appendChild(row);
     });
+    var foot = document.createElement('div');
+    foot.style.cssText = 'margin-top:9px;padding-top:7px;border-top:1px solid rgba(80,140,200,0.18);color:#5d738c;font-size:12px;line-height:1.6';
+    foot.innerHTML =
+      'vehicle size = packet size · ↓ in ↑ out<br>' +
+      '⚡ wire pulse = live socket stream<br>' +
+      '🚆 train = bandwidth spike<br>' +
+      '🏙 tower height = app traffic';
+    lg.appendChild(foot);
   })();
 
   var LOG_MAX = 13;
@@ -874,7 +1128,7 @@
       ? '<span class="app">' + (p.icon ? '<img src="/icon/' + p.icon + '.png" alt="">' : '') + esc(p.app) + '</span>'
       : '<span class="app"></span>';
     row.innerHTML = '<span class="dot" style="background:' + d.css + '"></span>' +
-      '<span class="proto">' + PROTO_LABEL[p.proto] + '</span>' + app +
+      '<span class="proto">' + (p.dir === 'in' ? '↓' : '↑') + ' ' + PROTO_LABEL[p.proto] + '</span>' + app +
       '<span class="bytes">' + fmtBytes(p.bytes) + '</span>';
     logRows.insertBefore(row, logRows.firstChild);
     while (logRows.children.length > LOG_MAX) logRows.removeChild(logRows.lastChild);
@@ -898,9 +1152,10 @@
       logPacket(arr[i]);
       if (arr[i].dest) destCounts[arr[i].dest] = (destCounts[arr[i].dest] || 0) + 1;
       if (arr[i].icon) iconBytes[arr[i].icon] = (iconBytes[arr[i].icon] || 0) + arr[i].bytes;
+      if (arr[i].wire) spawnPulse(arr[i].dir === 'in');
     }
   }
-  var bwEma = 0;
+  var bwEma = 0, dlEma = 0, upEma = 0;
   function handleStats(s) {
     ppsInEl.textContent = s.ppsIn;
     ppsOutEl.textContent = s.ppsOut;
@@ -922,7 +1177,7 @@
     // scene reactions: exposure breathes with traffic, fog thickens on bad ping,
     // street lamps shift warm -> cool as the network heats up
     var load = Math.min(1, mbps / 50);
-    expoTarget = 1.06 + load * 0.24;
+    expoTarget = (1.06 + load * 0.24) * envExpo;
     fogFarTarget = lastPing < 0 ? 360 : 430 - Math.min(110, Math.max(0, lastPing - 35) * 0.9);
     bulbMat.color.copy(bulbWarm).lerp(bulbCool, load);
 
@@ -932,6 +1187,13 @@
     if (!train && bwEma > 16 && performance.now() > trainCooldownUntil) {
       spawnTrain(Math.min(10, 3 + Math.floor(bwEma / 8)));
       trainCooldownUntil = performance.now() + 60000;
+    }
+    // heavy download -> airplane on landing approach; heavy upload -> takeoff
+    dlEma = dlEma * 0.7 + (s.bpsIn * 8 / 1e6) * 0.3;
+    upEma = upEma * 0.7 + (s.bpsOut * 8 / 1e6) * 0.3;
+    if (!plane && performance.now() > planeCooldownUntil) {
+      if (dlEma > 20) { spawnPlane(true); planeCooldownUntil = performance.now() + 90000; }
+      else if (upEma > 12) { spawnPlane(false); planeCooldownUntil = performance.now() + 90000; }
     }
     if (!lanesManual) {
       if (targetLanes < 6 && bwEma > 30) targetLanes = 6;
@@ -943,6 +1205,7 @@
   function handleServers(d) {
     lastServers = d.count;
     srvCountEl.textContent = d.count;
+    setDroneCount(Math.min(5, Math.floor(d.count / 8)));
     var html = '';
     d.top.forEach(function (s) {
       var label = s.host || s.ip;
@@ -968,6 +1231,17 @@
     });
     es.addEventListener('control', function (e) {
       paused = !!JSON.parse(e.data).pause;
+    });
+    es.addEventListener('env', function (e) {
+      var v = JSON.parse(e.data);
+      var code = v.code | 0;
+      envSnow = (code >= 71 && code <= 77) || code === 85 || code === 86;
+      var raining = v.precip > 0 || (code >= 51 && code <= 67) ||
+                    (code >= 80 && code <= 82) || code >= 95 || envSnow;
+      envRain = raining ? Math.max(0.35, Math.min(1, v.precip / 3 + 0.35)) : 0;
+      rainMat.color.setHex(envSnow ? 0xeef4ff : 0xa8c8e0);
+      rainFallSpeed = envSnow ? 10 : 45;
+      applyEnvironment();
     });
     es.addEventListener('layout', function (e) {
       if (window.__phApplyLayout) window.__phApplyLayout(JSON.parse(e.data));
@@ -1208,7 +1482,12 @@
   window.__ph = {
     lanes: function (n) { lanesManual = true; targetLanes = Math.max(LANE_MIN, Math.min(LANE_MAX, n)); },
     auto: function () { lanesManual = false; },
-    train: function (n) { spawnTrain(n || 6); }
+    train: function (n) { spawnTrain(n || 6); },
+    plane: function (land) { spawnPlane(land !== false); },
+    rain: function (lvl) { envRain = lvl == null ? 0.7 : lvl; applyEnvironment(); },
+    hour: function (h) { // preview a time of day, e.g. __ph.hour(17.5) for golden hour
+      __ph._h = h; applyEnvironment();
+    }
   };
 
   window.addEventListener('resize', function () {
@@ -1216,6 +1495,84 @@
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
+
+  // ----------------------------------------- environment: time + weather
+  // sky/light palettes follow the real local clock (golden hour included);
+  // rain/snow arrive from the backend's weather feed (open-meteo)
+  var PHASES = {
+    night:  { top: 0x05060f, mid: 0x1a1238, hor: 0x3a2450, fog: 0x131a30, hemiSky: 0x3a4a78, hemiGnd: 0x1a1238, hemiI: 1.25, dlC: 0x9db8e8, dlI: 0.7, stars: 1, sunY: -180, sunC: 0xffffff, expo: 1 },
+    golden: { top: 0x2a2438, mid: 0x7a4252, hor: 0xe08040, fog: 0x4a3340, hemiSky: 0xc08a5a, hemiGnd: 0x4a2e3a, hemiI: 1.2, dlC: 0xffb060, dlI: 1.15, stars: 0.15, sunY: 46, sunC: 0xffd0a0, expo: 1.12 },
+    day:    { top: 0x5a9ade, mid: 0x8abcec, hor: 0xc2dcf4, fog: 0x9cbcd8, hemiSky: 0xbcd8f0, hemiGnd: 0x8090a0, hemiI: 1.6, dlC: 0xfff2dd, dlI: 1.7, stars: 0, sunY: 340, sunC: 0xffffff, expo: 1.25 }
+  };
+  var RAIN_N = ECO ? 400 : 1500;
+  var rainGeo = new THREE.BufferGeometry();
+  (function () {
+    var arr = [];
+    for (var i = 0; i < RAIN_N; i++)
+      arr.push(-90 + Math.random() * 180, Math.random() * 70, -230 + Math.random() * 300);
+    rainGeo.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+  })();
+  var rainMat = new THREE.PointsMaterial({ color: 0xa8c8e0, size: 1.7, sizeAttenuation: false, transparent: true, opacity: 0.45 });
+  var rainPts = new THREE.Points(rainGeo, rainMat);
+  rainPts.visible = false; rainPts.frustumCulled = false;
+  scene.add(rainPts);
+  function stepRain(dt) {
+    if (!rainPts.visible) return;
+    var p = rainGeo.attributes.position;
+    var n = Math.floor(RAIN_N * Math.max(0.1, envRain));
+    for (var i = 0; i < n; i++) {
+      var y = p.getY(i) - (rainFallSpeed + (i % 7) * 3) * dt;
+      if (y < 0) y = 60 + Math.random() * 10;
+      p.setY(i, y);
+    }
+    p.needsUpdate = true;
+  }
+
+  function applyEnvironment() {
+    var d = new Date();
+    var h = (window.__ph && window.__ph._h != null) ? window.__ph._h : d.getHours() + d.getMinutes() / 60;
+    var sunAlt = Math.sin((h - 6) / 12 * Math.PI); // crude solar elevation
+    var day = Math.max(0, Math.min(1, (sunAlt - 0.12) / 0.28));
+    var golden = Math.max(0, 1 - Math.abs(sunAlt - 0.07) / 0.16);
+    var night = Math.max(0, Math.min(1, (0.02 - sunAlt) / 0.2));
+    var sum = day + golden + night || 1;
+    var w = { night: night / sum, golden: golden / sum, day: day / sum };
+    function blendC(f) {
+      var c = new THREE.Color(0, 0, 0);
+      Object.keys(w).forEach(function (k) {
+        var p = new THREE.Color(PHASES[k][f]);
+        c.r += p.r * w[k]; c.g += p.g * w[k]; c.b += p.b * w[k];
+      });
+      return c;
+    }
+    function blendN(f) {
+      var v = 0;
+      Object.keys(w).forEach(function (k) { v += PHASES[k][f] * w[k]; });
+      return v;
+    }
+    var fogC = blendC('fog');
+    if (envRain > 0) fogC.multiplyScalar(1 - envRain * 0.35); // rain darkens the sky
+    scene.fog.color.copy(fogC);
+    scene.background.copy(fogC);
+    setDomeColors(blendC('top').getHex(), blendC('mid').getHex(), blendC('hor').getHex());
+    hemi.color.copy(blendC('hemiSky')); hemi.groundColor.copy(blendC('hemiGnd'));
+    hemi.intensity = blendN('hemiI') * (1 - envRain * 0.25);
+    dl.color.copy(blendC('dlC'));
+    dl.intensity = blendN('dlI') * (1 - envRain * 0.4);
+    starsScale = blendN('stars') * (1 - envRain * 0.8);
+    envExpo = blendN('expo');
+    sunSprite.position.y = blendN('sunY');
+    sunHalo.position.y = sunSprite.position.y;
+    sunSprite.material.color.copy(blendC('sunC'));
+    sunSprite.material.opacity = 1 - envRain * 0.6;
+    sunHalo.material.opacity = 0.7 * (1 - envRain * 0.7);
+    var glowOn = w.night > 0.3 || envRain > 0.4; // street glow at night or in rain
+    nightGlow.forEach(function (m) { m.visible = glowOn; });
+    rainPts.visible = envRain > 0;
+    rainMat.opacity = 0.25 + envRain * 0.35;
+  }
+  setInterval(applyEnvironment, 60000);
+  applyEnvironment();
 
   // ------------------------------------------------------------ loop
   var last = performance.now(), acc = 0, frameMs = 1000 / FPS_CAP;
@@ -1253,13 +1610,14 @@
       applyCamera();
     }
 
-    // ambient dynamics: twinkle, exposure breathing, ping-weather fog
+    // ambient dynamics: twinkle, exposure breathing, ping-weather fog, rain
     if (starsMat) {
-      starsMat.opacity = 0.62 + 0.25 * Math.sin(now * 0.0005);
-      starsMat2.opacity = 0.4 + 0.2 * Math.sin(now * 0.00037 + 2);
+      starsMat.opacity = (0.62 + 0.25 * Math.sin(now * 0.0005)) * starsScale;
+      starsMat2.opacity = (0.4 + 0.2 * Math.sin(now * 0.00037 + 2)) * starsScale;
     }
     renderer.toneMappingExposure += (expoTarget - renderer.toneMappingExposure) * Math.min(1, dt);
     scene.fog.far += (fogFarTarget - scene.fog.far) * Math.min(1, dt * 0.4);
+    stepRain(dt);
 
     step(dt, now);
     renderer.render(scene, camera);

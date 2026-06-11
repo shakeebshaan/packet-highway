@@ -7,7 +7,11 @@ sizes, and the owning process. It never inspects, stores, or transmits payload
 contents. Everything runs locally:
 
 - The web server binds to `127.0.0.1` only (never `0.0.0.0`).
-- No telemetry, no analytics, no outbound connections of any kind.
+- No telemetry, no analytics. Capture data never leaves the machine.
+- The only outbound requests the backend makes are the weather feature: one
+  call to `ip-api.com` (coarse lat/lon from your IP) and periodic calls to
+  `api.open-meteo.com` (current precipitation), so the scene's sky can match
+  your weather. Neither request contains any capture data.
 - The hosted demo on GitHub Pages is **fully synthetic** — it generates fake
   traffic in the browser and captures nothing.
 
